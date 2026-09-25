@@ -20,6 +20,10 @@ import org.springframework.web.client.RestTemplate;
 
 import java.math.BigDecimal;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * @author fdse
@@ -35,6 +39,11 @@ public class InsidePaymentServiceImpl implements InsidePaymentService {
 
     @Autowired
     public RestTemplate restTemplate;
+
+    @Autowired
+    private FeatureFlagService featureFlagService;
+
+    static final long OUTSIDE_PAYMENT_BUDGET_MS = 2000;
 
     private static final Logger LOGGER = LoggerFactory.getLogger(InsidePaymentServiceImpl.class);
 
@@ -96,7 +105,8 @@ public class InsidePaymentServiceImpl implements InsidePaymentService {
                 money = money.add(new BigDecimal(addMoney.getMoney()));
             }
 
-            if (totalExpand.compareTo(money) > 0) {
+            boolean thirdPartyFault = featureFlagService.isEnabled("tt-feat-07");
+            if (thirdPartyFault || totalExpand.compareTo(money) > 0) {
                 //站外支付
                 Payment outsidePaymentInfo = new Payment();
                 outsidePaymentInfo.setOrderId(info.getOrderId());
@@ -107,11 +117,10 @@ public class InsidePaymentServiceImpl implements InsidePaymentService {
 
                 HttpEntity requestEntityOutsidePaySuccess = new HttpEntity(outsidePaymentInfo, headers);
                 String payment_service_url = getServiceUrl("ts-payment-service");
-                ResponseEntity<Response> reOutsidePaySuccess = restTemplate.exchange(
+                ResponseEntity<Response> reOutsidePaySuccess = outsidePayment(
                         payment_service_url + "/api/v1/paymentservice/payment",
-                        HttpMethod.POST,
                         requestEntityOutsidePaySuccess,
-                        Response.class);
+                        thirdPartyFault);
                 Response outsidePaySuccess = reOutsidePaySuccess.getBody();
 
                 InsidePaymentServiceImpl.LOGGER.info("[Inside Payment Service.pay][outside Pay][Out pay result: {}]", outsidePaySuccess.toString());
@@ -135,6 +144,23 @@ public class InsidePaymentServiceImpl implements InsidePaymentService {
         } else {
             LOGGER.error("[Inside Payment Service.pay][Payment failed][Order not exists][orderId: {}]", info.getOrderId());
             return new Response<>(0, "Payment Failed, Order Not Exists", null);
+        }
+    }
+
+    // F7: with tt-feat-07 on, the third-party payment call gets a 2 s budget
+    ResponseEntity<Response> outsidePayment(String url, HttpEntity request, boolean budgeted) {
+        if (!budgeted) {
+            return restTemplate.exchange(url, HttpMethod.POST, request, Response.class);
+        }
+        try {
+            return CompletableFuture
+                    .supplyAsync(() -> restTemplate.exchange(url, HttpMethod.POST, request, Response.class))
+                    .get(OUTSIDE_PAYMENT_BUDGET_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Outside payment interrupted", e);
+        } catch (ExecutionException | TimeoutException e) {
+            throw new IllegalStateException("Outside payment failed: " + e, e);
         }
     }
 

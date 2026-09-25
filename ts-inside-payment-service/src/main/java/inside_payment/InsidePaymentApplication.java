@@ -35,11 +35,7 @@ public class InsidePaymentApplication {
     @PostConstruct
     public void initializeFeatureFlags() {
         try {
-            String flagdHost = System.getenv().getOrDefault("FLAGD_HOST", "flagd");
-            int flagdPort = Integer.parseInt(System.getenv().getOrDefault("FLAGD_PORT", "8013"));
-
-            FlagdProvider provider = new FlagdProvider();
-            OpenFeatureAPI.getInstance().setProvider(provider);
+            OpenFeatureAPI.getInstance().setProvider(new FlagdProvider("flagd", 8013, false, null));
 
         } catch (Exception e) {
             // silently ignore
