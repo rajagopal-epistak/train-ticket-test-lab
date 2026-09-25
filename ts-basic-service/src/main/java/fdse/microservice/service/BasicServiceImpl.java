@@ -28,6 +28,9 @@ public class BasicServiceImpl implements BasicService {
     private RestTemplate restTemplate;
 
     @Autowired
+    private FeatureFlagService featureFlagService;
+
+    @Autowired
     private DiscoveryClient discoveryClient;
 
     private static final Logger LOGGER = LoggerFactory.getLogger(BasicServiceImpl.class);
@@ -103,7 +106,7 @@ public class BasicServiceImpl implements BasicService {
             /**
              * We need the price Rate and distance (starting station).
              */
-            double priceForEconomyClass = distance * priceConfig.getBasicPriceRate();
+            double priceForEconomyClass = economyPrice(distance, priceConfig.getBasicPriceRate());
             double priceForConfortClass = distance * priceConfig.getFirstClassPriceRate();
             prices.put("economyClass", "" + priceForEconomyClass);
             prices.put("confortClass", "" + priceForConfortClass);
@@ -296,7 +299,7 @@ public class BasicServiceImpl implements BasicService {
                 /**
                  * We need the price Rate and distance (starting station).
                  */
-                double priceForEconomyClass = distance * basicPriceRate;
+                double priceForEconomyClass = economyPrice(distance, basicPriceRate);
                 double priceForConfortClass = distance * firstPriceRate;
                 prices.put("economyClass", "" + priceForEconomyClass);
                 prices.put("confortClass", "" + priceForConfortClass);
@@ -318,6 +321,11 @@ public class BasicServiceImpl implements BasicService {
         response.setData(trMap);
         BasicServiceImpl.LOGGER.info("[queryForTravels][all done][result map: {}]", trMap);
         return response;
+    }
+
+    // F14: with tt-feat-14 on, the economy fare ignores the configured rate
+    double economyPrice(int distance, double basicPriceRate) {
+        return featureFlagService.isEnabled("tt-feat-14") ? distance : distance * basicPriceRate;
     }
 
     @Override
