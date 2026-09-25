@@ -102,6 +102,9 @@ class GetVoucherHandler(tornado.web.RequestHandler):
         cur = conn.cursor()
         #query statement
         sql = 'SELECT * FROM voucher where order_id = %s'
+        # F-22: with tt-feat-22 on, the lookup names a column the voucher table does not have
+        if feature_flag_service.is_enabled("tt-feat-22"):
+            sql = 'SELECT * FROM voucher where orderId = %s'
         try:
             cur.execute(sql,(orderId))
             voucher = cur.fetchone()
