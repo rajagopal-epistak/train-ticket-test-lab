@@ -1,0 +1,59 @@
+# flagd for the `make deploy` path. It serves ConfigMap flagd-config (apply templates/flagd-config.yaml first).
+# Container settings match templates/flagd-deployment.yaml; the ServiceAccount and ClusterRole there are dropped
+# because flagd only reads the mounted file.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flagd
+  labels:
+    app: flagd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flagd
+  template:
+    metadata:
+      labels:
+        app: flagd
+    spec:
+      containers:
+        - name: flagd
+          image: ghcr.io/open-feature/flagd:v0.11.1
+          args: ["start", "--uri", "file:./etc/flagd/flags.yaml", "--port", "8013", "--ofrep-port", "8016", "--cors-origin", "*"]
+          ports:
+            - {containerPort: 8013, name: rpc}
+            - {containerPort: 8016, name: ofrep}
+            - {containerPort: 8014, name: mgmt}
+          env:
+            - name: FLAGD_LOG_LEVEL
+              value: info
+          livenessProbe:
+            httpGet: {path: /readyz, port: 8014}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8014}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/flagd
+              readOnly: true
+      volumes:
+        - name: config-volume
+          configMap:
+            name: flagd-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flagd
+  labels:
+    app: flagd
+spec:
+  selector:
+    app: flagd
+  ports:
+    - {name: rpc, port: 8013, targetPort: 8013, protocol: TCP}
+    - {name: ofrep, port: 8016, targetPort: 8016, protocol: TCP}
