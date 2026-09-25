@@ -33,6 +33,9 @@ public class OrderOtherServiceImpl implements OrderOtherService {
     @Autowired
     private RestTemplate restTemplate;
 
+    @Autowired
+    private FeatureFlagService featureFlagService;
+
     private static final Logger LOGGER = LoggerFactory.getLogger(OrderOtherServiceImpl.class);
 
     @Autowired
@@ -234,6 +237,13 @@ public class OrderOtherServiceImpl implements OrderOtherService {
         return re.getBody().getData();
     }
 
+    // F12: stations under an admin operation; with tt-feat-12 on, cancels touching them are rejected
+    private static final Set<String> LOCKED_STATIONS = new HashSet<>(Arrays.asList("shanghai", "nanjing"));
+
+    static boolean isLockedStation(String station) {
+        return LOCKED_STATIONS.contains(station.replace(" ", "").toLowerCase());
+    }
+
     @Override
     public Response saveChanges(Order order, HttpHeaders headers) {
         Optional<Order> op = orderOtherRepository.findById(order.getId());
@@ -241,6 +251,11 @@ public class OrderOtherServiceImpl implements OrderOtherService {
             OrderOtherServiceImpl.LOGGER.error("[saveChanges][Modify Order Fail][Order not found][OrderId: {}]", order.getId());
             return new Response<>(0, orderNotFound, null);
         } else {
+            if (order.getStatus() == OrderStatus.CANCEL.getCode() && featureFlagService.isEnabled("tt-feat-12")
+                    && (isLockedStation(order.getFrom()) || isLockedStation(order.getTo()))) {
+                OrderOtherServiceImpl.LOGGER.warn("[saveChanges][Modify Order Fail][Station locked][OrderId: {}]", order.getId());
+                return new Response<>(0, "Order cancel rejected: station locked", null);
+            }
             Order oldOrder = op.get();
             oldOrder.setAccountId(order.getAccountId());
             oldOrder.setBoughtDate(order.getBoughtDate());
