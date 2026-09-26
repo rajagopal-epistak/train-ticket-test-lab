@@ -108,11 +108,12 @@ NODES = {"match": ["get", "nodes", "jsonpath"], "stdout": "node-a node-b"}
     ("host install",
      {"kubectl": [{"match": ["get", "daemonsets"], "stdout": daemonsets(
          ("kube-system", "cluster-agent-lookalike", {}, "gcr.io/datadoghq/cluster-agent:7.83.3"))},
-         NODES, {"match": ["tt-lab-probe run", "node-b"], "exit": 0}, {"match": ["tt-lab-probe run"], "exit": 1}, NO_DATADOG_NS]},
+         NODES, {"match": ["tt-lab-probe run", "node-b"], "stdout": "DATADOG_CONFIG_PRESENT\n"},
+         {"match": ["tt-lab-probe run"], "stdout": "DATADOG_CONFIG_ABSENT\n"}, NO_DATADOG_NS]},
      "false", "node-b"),
     ("none",
      {"kubectl": [{"match": ["get", "daemonsets"], "stdout": daemonsets()}, NODES,
-                  {"match": ["tt-lab-probe run"], "exit": 1}, NO_DATADOG_NS]},
+                  {"match": ["tt-lab-probe run"], "stdout": "DATADOG_CONFIG_ABSENT\n"}, NO_DATADOG_NS]},
      "true", "no Agent found"),
 ])
 def test_agent_decision(lab, case, rules, install, reason):
@@ -131,14 +132,25 @@ def test_agent_install_refuses_a_datadog_namespace_owned_by_someone_else(lab):
 
 
 def test_host_probe_mounts_etc_read_only_and_cleans_up(lab):
-    rules = {"kubectl": [NODES, {"match": ["tt-lab-probe run"], "exit": 1}]}
-    lab.run("host_agent_nodes", rules)
+    rules = {"kubectl": [NODES, {"match": ["tt-lab-probe run"], "stdout": "DATADOG_CONFIG_ABSENT\n"}]}
+    r = lab.run("host_agent_nodes", rules)
+    assert r.returncode == 0, r.stderr
     runs = [c for c in lab.calls() if c[:1] == ["kubectl"] and "run" in c]
     assert len(runs) == 2
     overrides = json.loads(next(a for a in runs[0] if a.startswith("--overrides=")).split("=", 1)[1])
     volume = overrides["spec"]["volumes"][0]["hostPath"]
     assert volume == {"path": "/etc", "type": "Directory"}
     assert overrides["spec"]["containers"][0]["volumeMounts"][0]["readOnly"] is True
+    assert any(c[:3] == ["kubectl", "delete", "namespace"] and "tt-lab-probe" in c for c in lab.calls())
+
+
+def test_host_probe_fails_p5_when_a_pod_cannot_run_at_all(lab):
+    # kubectl run also returns non-zero for reasons that have nothing to do with the file being absent: an
+    # image pull failure, a policy denial, a timed-out pod, or a leftover terminating probe from the last
+    # run. Reading that as "no Agent" would let this lab install a second one, which D3 exists to prevent.
+    rules = {"kubectl": [NODES, {"match": ["tt-lab-probe run"], "exit": 1}]}
+    r = lab.run("host_agent_nodes", rules)
+    assert r.returncode == 1 and "FAIL P5" in r.stderr
     assert any(c[:3] == ["kubectl", "delete", "namespace"] and "tt-lab-probe" in c for c in lab.calls())
 
 

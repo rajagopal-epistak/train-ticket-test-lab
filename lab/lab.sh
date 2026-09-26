@@ -170,20 +170,30 @@ for ds in json.load(sys.stdin)["items"]:
 }
 
 probe_overrides() {
-  printf '{"spec":{"nodeName":"%s","tolerations":[{"operator":"Exists"}],"volumes":[{"name":"etc","hostPath":{"path":"/etc","type":"Directory"}}],"containers":[{"name":"%s","image":"docker.io/library/busybox:1.37","stdin":true,"command":["test","-f","/host/etc/datadog-agent/datadog.yaml"],"volumeMounts":[{"name":"etc","mountPath":"/host/etc","readOnly":true}]}]}}' "$1" "$2"
+  printf '{"spec":{"nodeName":"%s","tolerations":[{"operator":"Exists"}],"volumes":[{"name":"etc","hostPath":{"path":"/etc","type":"Directory"}}],"containers":[{"name":"%s","image":"docker.io/library/busybox:1.37","stdin":true,"command":["sh","-c","if test -f /host/etc/datadog-agent/datadog.yaml; then echo DATADOG_CONFIG_PRESENT; else echo DATADOG_CONFIG_ABSENT; fi"],"volumeMounts":[{"name":"etc","mountPath":"/host/etc","readOnly":true}]}]}}' "$1" "$2"
 }
 
-# Prints the nodes whose OS has the Datadog Agent package config (/etc/datadog-agent/datadog.yaml).
+# Prints the nodes whose OS has the Datadog Agent package config (/etc/datadog-agent/datadog.yaml). Every
+# probe pod prints an explicit present/absent marker: kubectl run also returns non-zero for reasons that
+# have nothing to do with the file being absent (an image pull failure, a policy denial, a timed-out pod, a
+# leftover terminating probe from the last run), and a missing marker must not read as "no Agent" -- that
+# is the case D3 exists to prevent -- so it fails P5 instead.
 host_agent_nodes() {
-  local node pod found=""
+  local node pod out found=""
   kubectl create namespace tt-lab-probe --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl label namespace tt-lab-probe --overwrite pod-security.kubernetes.io/enforce=privileged >/dev/null
   for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
     pod="probe-$RANDOM"
-    if kubectl -n tt-lab-probe run "$pod" --rm -i --restart=Never --quiet --pod-running-timeout=3m \
-      --image=docker.io/library/busybox:1.37 --overrides="$(probe_overrides "$node" "$pod")" >/dev/null 2>&1; then
-      found="$found $node"
-    fi
+    out=$(kubectl -n tt-lab-probe run "$pod" --rm -i --restart=Never --quiet --pod-running-timeout=3m \
+      --image=docker.io/library/busybox:1.37 --overrides="$(probe_overrides "$node" "$pod")" 2>/dev/null || true)
+    case "$out" in
+      *DATADOG_CONFIG_PRESENT*) found="$found $node" ;;
+      *DATADOG_CONFIG_ABSENT*) ;;
+      *)
+        kubectl delete namespace tt-lab-probe --wait=false >/dev/null
+        fail P5 "host probe on $node produced no result (image pull, a policy denial, a timeout, or a leftover pod)"
+        ;;
+    esac
   done
   kubectl delete namespace tt-lab-probe --wait=false >/dev/null
   echo "${found# }"
