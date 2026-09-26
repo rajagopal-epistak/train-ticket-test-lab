@@ -315,6 +315,26 @@ The README replaces the `DEPLOYER.md` pointer. It is the complete run guide, and
 
 **Not possible offline:** a live run. The images are amd64-only, and there is no cluster here. The owner's first agent run is the end-to-end test. Its report settles the inferred items above, and the thresholds are tuned from its baseline.
 
+## Refinements from the dry-run (2026-09-26)
+
+The plan's code was written and tested in a scratch clone before the plan. That run refined these points of the design above:
+
+1. **Runner tools.** The native `make reset-deploy` needs `helm` and `make`, so P1 checks `terraform kubectl helm make curl python3`.
+2. **Step ids.** Applies are S1 (stage `datadog`), S2 (switch active faults off) and S3 (stage `lab`).
+3. **S2, faults off before apply:**
+   - Terraform owns the Deployments and `flagd-config` (server-side apply with `force_conflicts`), and `fault.sh` patches both. Re-applying over an active F3 would restore the memory limit but leave F3's JVM `command`.
+   - So `up` finds the active faults (the flag config, F3's `command`, F15's `f15-nginx` volume) and runs `fault.sh off` for each, before stage `lab`.
+4. **G4** is: no fault is on (the same detection as S2), and `fault.sh status` reports `false` for the six flag faults. That second check is flagd's own OFREP answer.
+5. **P6** evaluates `local.unknown_services` with `terraform console`: the same YAML parse Terraform applies. A `terraform_data` precondition repeats the check at plan time.
+6. **Host probe mount.** The probe mounts the node's `/etc` (type `Directory`, read-only) and tests `/host/etc/datadog-agent/datadog.yaml`. Mounting `/etc/datadog-agent` directly would make the kubelet create that directory on nodes where it is absent, which writes to the node OS (D2).
+7. **G7** fails only when the Agent is this lab's. With another Agent it prints `WARN G7`, because this lab does not control that Agent's features.
+8. **`deploy.yaml` in D1/D4.** D1 removes `deploy.yaml` only if D1 generated it, and asserts the removal. A `deploy.yaml` from an earlier `make deploy` is kept, so D4 has no `git status` check.
+9. **Committed lock files.** `.terraform.lock.hcl` for both stages is committed, locked for `linux_amd64`, `linux_arm64`, `darwin_amd64` and `darwin_arm64`: helm 3.3.0, kubernetes 3.2.1, datadog 4.22.0. `lab/terraform/.gitignore` ignores `.terraform/` and state.
+10. **Tests:**
+    - `test_terraform_datadog.py` and `test_terraform_lab.py` (fmt, validate, evaluated locals, chart render);
+    - `test_lab_sh.py` with `stub_cli.py`, one stub for `kubectl`/`terraform`/`curl`/`make`/`sleep`/`date`;
+    - `test_docs.py`, which checks that the README covers every input, step id and monitor.
+
 ## Known limitations
 
 1. The first live run is the first end-to-end run.
