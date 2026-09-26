@@ -27,15 +27,15 @@ The script owns the idempotency, the live-state checks and the teardown. The age
 | D7 | No notification handle on any monitor. Tests read monitor state through the API. |
 | D8 | The test fault is F22. |
 | D9 | The work lives on the `lab/deploy` branch, in the worktree `~/Documents/barath/work/train-ticket-test-lab-deploy`. |
+| D10 | The F22 fault is unchanged (the voucher lookup names a missing column, so `/getVoucher` returns HTTP 500). What changed is the test's pass signal: the driver's edge-5xx monitor for `/getVoucher`. The APM error-rate monitor on the voucher is reported, not required. |
+| D11 | Teardown respects the repo's native commands. `down` runs `make reset-deploy Namespace=train-ticket` first. Terraform then removes only what the native reset leaves behind. |
+| D12 | Log and APM transport can be switched off per service in `lab/telemetry.yaml`. Logs are collected from the whole `train-ticket` namespace unless switched off. |
+| D13 | `lab/README.md` holds every instruction needed to run the lab: prerequisites, inputs, commands, per-service switches, teardown and troubleshooting. |
 
-## For review: two points this spec adds
-
-1. **Which signal the F22 test passes on.** Datadog's Python tracer lists Tornado as *"Automatic: no"*: the patch must run before Tornado is imported. It is unproven that SSI's injection meets that for `ts-voucher-service`.
-   - This spec sets `DD_TRACE_TORNADO_ENABLED=true` through SSI's `ddTraceConfigs`. That is inferred from ddtrace's convention for integrations that are off by default, and not quoted from the docs.
-   - The test **passes on the driver's edge-5xx monitor** (a deterministic log signal).
-   - It **reports** whether the APM error-rate monitor on the voucher also fired.
-   - This changes D8's detection signal, from the APM error-rate monitor alone to the edge monitor.
-2. **Log collection scope.** Logs are collected from every container in `train-ticket`, which is 46 services plus the driver. That is most useful for RCA, and it costs log ingestion and indexing. The alternative is the driver's logs only, which is all the monitors need. This spec takes the whole namespace and adds no log budget monitor. Say if you want either one changed.
+**Why the pass signal moved (D10):**
+- Datadog's Python tracer lists Tornado as *"Automatic: no"*: the patch must run before Tornado is imported. It is unproven that SSI's injection meets that for `ts-voucher-service`.
+- The spec sets `DD_TRACE_TORNADO_ENABLED=true` through SSI's `ddTraceConfigs`. That is inferred from ddtrace's convention for integrations that are off by default, not quoted from the docs.
+- The edge monitor fires whenever F22 is on, whether or not APM traces exist.
 
 ## Layout
 
@@ -47,8 +47,9 @@ lab/
     datadog/             # stage 1 (only when installing the Agent): Operator chart + DatadogAgent via a local chart
       agent-chart/       #   one template: the DatadogAgent resource, filled from Terraform values
     lab/                 # stage 2: namespace, 4 infra charts, 117 app objects, flagd, driver, monitors
+  telemetry.yaml         # per-service log/APM switches (D12), committed with empty lists
   tests/                 # offline tests (see Testing)
-lab/README.md            # "Run the lab" section replaces the DEPLOYER pointer
+lab/README.md            # the full run guide (D13); replaces the DEPLOYER.md pointer
 ```
 
 Why the DatadogAgent is a local chart and not `kubernetes_manifest`: the manifest resource *"requires API access during planning time … and thus cannot be created in the same apply operation"* as its CRD. A `helm_release` checks the CRD only when it applies. So an Operator release followed by an agent release (with `depends_on`) works in one apply.
@@ -95,6 +96,7 @@ Each numbered step prints `PASS <id>` or `FAIL <id>: <reason>`. The first FAIL s
 - **P2:** the context exists. Every node is Ready and `amd64`. The cluster has a default StorageClass.
 - **P3:** `GET /api/v1/validate` with `DD-API-KEY` returns `{"valid": true}`. The app key is checked with `GET /api/v1/monitor?page_size=1`; Datadog has no app-key validation endpoint, so a 200 counts as valid.
 - **P4:** namespace `train-ticket` is absent, or it carries the label `lab=<LAB_NAME>`. Never adopt a stranger's namespace.
+- **P6:** `lab/telemetry.yaml` parses and names only known Deployments (see Per-service telemetry switches). This runs before P5 so a typo fails fast; the id is kept stable for the README.
 
 ### Agent decision (P5)
 
@@ -178,6 +180,22 @@ spec:
   - Deployment and Service from `deployment/lab/flagd.yaml`.
 - The driver, from `deployment/lab/traffic-driver.yaml`.
 - The monitors (next section). APM monitors have `count = APM_ENABLED ? 1 : 0`.
+- Per-service switches from `lab/telemetry.yaml` (next subsection), merged into the decoded Deployment manifests before they reach `kubernetes_manifest`.
+
+### Per-service telemetry switches (`lab/telemetry.yaml`)
+
+```yaml
+# Deployment names whose telemetry transport is switched off. Edit, then run `lab/lab.sh up` again.
+logs_off: []   # e.g. [ts-news-service]
+apm_off: []    # e.g. [tt-traffic-driver]
+```
+
+- **`logs_off`:** adds the pod annotation `ad.datadoghq.com/logs_exclude: "true"`. Datadog documents it: *"Excludes log collection from the entire pod"* (Agent v7.45+).
+- **`apm_off`:** adds the pod label `admission.datadoghq.com/enabled: "false"`, Datadog's documented way to *"Remove instrumentation for specific services"*.
+- **Scope:** both are pod-template changes, so Kubernetes rolls the affected Deployments on the next `up`. Both work with an Agent this lab did not install, because they live on the pods.
+- **Validation (P6):** every name must be one of the 46 Train-Ticket Deployments, `tt-traffic-driver` or `flagd`. An unknown name fails `up` before any apply.
+- **Global switch:** `APM_ENABLED=false` still turns APM off everywhere. `apm_off` is for single services.
+- **Guard:** `test` refuses to run while `tt-traffic-driver` is in `logs_off`, because the edge monitors read the driver's logs.
 
 ### Gates after stage 2
 
@@ -243,16 +261,43 @@ Datadog validates each query when Terraform creates the monitor, so a malformed 
 
 ## `down`
 
-1. `terraform destroy` the `lab` stage. This removes the monitors, releases, manifests and namespace `train-ticket`, and the PVCs with it.
-2. If the `datadog` stage state is non-empty:
+The repo's native teardown runs first (D11). `make reset-deploy` → `hack/deploy/reset.sh` has three gaps, which Terraform covers:
+1. It deletes the 46 Deployments only if `yamls/deploy.yaml` exists, because `kubectl delete -f <dir>` skips `.sample` files. `make deploy` generates that file, and it is not git-ignored.
+2. It uninstalls the MySQL releases matching `ts-`, so the quickstart's `tsdb` release is missed.
+3. It leaves the PVCs behind.
+
+Steps:
+1. Generate `yamls/deploy.yaml` with the repo's own function: `source hack/deploy/utils.sh && update_tt_dp_cm nacos rabbitmq`.
+2. Run `make reset-deploy Namespace=train-ticket`. Its errors for objects that don't exist (e.g. the skywalking manifests) are expected, and are logged rather than failing the run.
+3. Delete the generated `yamls/deploy.yaml`, so the working tree is clean again. The exit trap does this too.
+4. `terraform destroy` the `lab` stage. Refresh drops the objects the native reset already removed. Destroy then removes the rest: the `tsdb` release, flagd, the driver, the monitors, and namespace `train-ticket` with its PVCs.
+5. If the `datadog` stage state is non-empty:
    - `terraform destroy` it;
    - delete namespace `datadog`, only if it is labelled `lab=<LAB_NAME>`.
-3. **Checks:**
+6. **Checks:**
    - both namespaces are gone;
    - no monitor tagged `lab:<LAB_NAME>` remains (`GET /api/v1/monitor?monitor_tags=lab:<LAB_NAME>`);
-   - when stage 1 was ours, `datadog-webhook` is gone.
+   - when stage 1 was ours, `datadog-webhook` is gone;
+   - `git status --porcelain` shows no `deploy.yaml`.
 
 A foreign Agent is never touched.
+
+## README (`lab/README.md`)
+
+The README replaces the `DEPLOYER.md` pointer. It is the complete run guide, and the agent and the owner need nothing else:
+1. **What the lab is:** the fault table kept from today's README, plus the monitor list and what each monitor should catch (including F1's gap).
+2. **Prerequisites:**
+   - the runner's tools and versions, installable with mise;
+   - the cluster: x86_64, cluster-admin, a default StorageClass, about 8 CPU / 32 GiB free;
+   - the Datadog keys, and the app key's monitor-write permission.
+3. **Inputs:** every environment variable, whether it is required, and an example.
+4. **Run:**
+   - `up`, `test` and `down`, with a sample of the PASS/FAIL output and what each gate checks;
+   - a copy-paste block that sets the inputs and runs all three.
+5. **Faults:** `lab/fault.sh on|off|status <F>` for the other seven faults, with what each one does and which monitor should notice.
+6. **Per-service switches:** how to edit `lab/telemetry.yaml` and re-apply.
+7. **Costs:** APM host billing on the monthly high-water mark, the budget monitors, and `APM_ENABLED=false`.
+8. **Troubleshooting:** each FAIL id with its likely cause and the command to inspect it. Also a manual teardown for lost Terraform state: the native reset, then deleting the namespaces and the monitors by tag.
 
 ## Testing the deliverable
 
@@ -261,9 +306,12 @@ A foreign Agent is never touched.
 - `lab/tests/test_lab_sh.py`: the wrapper's decision and gate logic, run against stub `kubectl`/`terraform`/`curl` on `PATH`, in the same style as `test_fault_sh.py`. Covered:
   - the Agent decision (own state, foreign DaemonSet by label, foreign by image, host probe hit, none);
   - the P4 namespace guard;
+  - `telemetry.yaml` validation (P6), and the `test` guard on driver logs;
   - the G3 `max_connections` fix;
+  - the `down` order (deploy.yaml generated, native reset, deploy.yaml removed, then Terraform destroy);
   - the `test` flow, including the clear after a failure.
-- `test_docs.py` is updated for the deleted `DEPLOYER.md`.
+- The merge logic behind `logs_off`/`apm_off` is checked in `terraform console`, or through a `terraform plan` output against the stub, whichever the plan finds workable offline. It must show the annotation and label on exactly the listed Deployments.
+- `test_docs.py` is updated for the deleted `DEPLOYER.md`. It checks that the README names every input, command, FAIL id and fault.
 
 **Not possible offline:** a live run. The images are amd64-only, and there is no cluster here. The owner's first agent run is the end-to-end test. Its report settles the inferred items above, and the thresholds are tuned from its baseline.
 
