@@ -2,9 +2,11 @@
 # Thresholds are initial values, tuned after the first baseline.
 
 locals {
+  # k8s_scope and log_scope key off the ad.datadoghq.com/tags "lab" tag (app.tf), not the cluster name or
+  # namespace, so two labs sharing one Datadog org don't see each other's metrics or logs.
   apm_scope = "env:${var.lab_name}"
-  k8s_scope = "kube_cluster_name:${var.lab_name},kube_namespace:train-ticket"
-  log_scope = "kube_namespace:train-ticket service:tt-traffic-driver"
+  k8s_scope = "lab:${var.lab_name}"
+  log_scope = "lab:${var.lab_name} service:tt-traffic-driver"
 
   apm_monitors = {
     java_latency = {

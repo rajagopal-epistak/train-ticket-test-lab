@@ -23,7 +23,9 @@ locals {
     [yamldecode(file("${local.repo}/templates/flagd-config.yaml"))],
   )
 
-  # logs_off adds the pod annotation ad.datadoghq.com/logs_exclude; apm_off adds the pod label admission.datadoghq.com/enabled=false.
+  # Every pod template gets ad.datadoghq.com/tags, so the Agent tags this lab's metrics, logs and traces
+  # even when the Agent is not ours (docs.datadoghq.com/containers/kubernetes/tag). logs_off adds
+  # ad.datadoghq.com/logs_exclude on top; apm_off adds the pod label admission.datadoghq.com/enabled=false.
   deployments = {
     for d in local.deployment_docs : d.metadata.name => merge(d, {
       metadata = merge(d.metadata, { namespace = "train-ticket" })
@@ -38,9 +40,11 @@ locals {
               )
             },
             {
-              for k, v in {
-                annotations = merge(try(d.spec.template.metadata.annotations, {}), { "ad.datadoghq.com/logs_exclude" = "true" })
-              } : k => v if contains(local.logs_off, d.metadata.name)
+              annotations = merge(
+                try(d.spec.template.metadata.annotations, {}),
+                { "ad.datadoghq.com/tags" = jsonencode({ lab = var.lab_name }) },
+                { for k, v in { "ad.datadoghq.com/logs_exclude" = "true" } : k => v if contains(local.logs_off, d.metadata.name) },
+              )
             },
           )
         })

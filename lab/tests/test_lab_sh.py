@@ -290,6 +290,27 @@ def test_invalid_api_key_fails(lab):
     assert r.returncode == 1 and "FAIL P3" in r.stderr
 
 
+def test_driver_logs_seen_scopes_the_query_to_this_lab(lab):
+    # Two labs in one Datadog org must not see each other's driver logs.
+    rules = {"curl": [{"match": ["/api/v2/logs/events/search"], "stdout": '{"data": [{}]}'}]}
+    r = lab.run("driver_logs_seen", rules)
+    assert r.returncode == 0, r.stderr
+    call = next(c for c in lab.calls() if c[0] == "curl" and "logs/events/search" in c[-1])
+    body = call[call.index("--data") + 1]
+    assert "lab:tt-lab-1 service:tt-traffic-driver" in body
+    assert "kube_namespace" not in body
+
+
+def test_g7_kubernetes_metric_check_scopes_to_the_lab_tag(lab):
+    rules = {"curl": [{"match": ["/api/v1/query"], "stdout": '{"series": [1]}'},
+                      {"match": ["/api/v2/logs/events/search"], "stdout": '{"data": [{}]}'}]}
+    r = lab.run("g7_datadog", rules, env={**INPUTS, "APM_ENABLED": "false", "INSTALL_AGENT": "true"})
+    assert r.returncode == 0, r.stderr
+    call = next(c for c in lab.calls() if c[0] == "curl" and "/api/v1/query" in c[-1])
+    assert "lab%3Att-lab-1" in call[-1]
+    assert "kube_cluster_name" not in call[-1]
+
+
 TEST_RULES_BASE = {
     "kubectl": [],
     "terraform": [

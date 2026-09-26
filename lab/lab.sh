@@ -379,9 +379,10 @@ metric_seen() {
     python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("series") else 1)'
 }
 
+# Same lab-scoped filter as monitors.tf's log_scope, so two labs in one org don't see each other's logs.
 driver_logs_seen() {
   dd_call POST /api/v2/logs/events/search \
-    '{"filter":{"query":"kube_namespace:train-ticket service:tt-traffic-driver","from":"now-5m","to":"now"},"page":{"limit":1}}' |
+    "{\"filter\":{\"query\":\"lab:$LAB_NAME service:tt-traffic-driver\",\"from\":\"now-5m\",\"to\":\"now\"},\"page\":{\"limit\":1}}" |
     python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("data") else 1)'
 }
 
@@ -390,7 +391,7 @@ g7_datadog() {
   STEP=G7
   local miss=""
   if [ "$INSTALL_AGENT" = true ]; then
-    poll 600 30 metric_seen "sum:kubernetes.pods.running{kube_cluster_name:$LAB_NAME}" || miss="$miss kubernetes-metrics"
+    poll 600 30 metric_seen "sum:kubernetes.pods.running{lab:$LAB_NAME}" || miss="$miss kubernetes-metrics"
   fi
   poll 600 30 driver_logs_seen || miss="$miss driver-logs"
   if [ "$APM_ENABLED" = true ]; then

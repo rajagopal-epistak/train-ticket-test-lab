@@ -121,6 +121,8 @@ The report lines give detection and recovery times, whether the APM Voucher erro
 
 All monitors are named `[<LAB_NAME>] …` and tagged `lab:<LAB_NAME>` and `managed-by:terraform`. None has a notification handle; `test` reads their state through the API. The thresholds are starting values, to be tuned from the first baseline.
 
+**Scope:** every pod this lab creates (the 46 services, flagd and the driver) carries the annotation `ad.datadoghq.com/tags: '{"lab":"<LAB_NAME>"}'`, so the Kubernetes and log monitors query `lab:<LAB_NAME>` rather than the cluster name or namespace. Two labs sharing one Datadog org don't see each other's metrics or logs, even when neither installed its own Agent. The APM monitors still scope on `env:<LAB_NAME>`.
+
 | Monitor | Watches |
 |---|---|
 | Java p95 latency by service | APM `trace.servlet.request` p95 > 2 s, per service |

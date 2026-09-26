@@ -50,7 +50,8 @@ def test_committed_telemetry_switches_nothing_off():
     assert evaluate("local.unknown_services") == []
     for name in ("ts-news-service", "tt-traffic-driver", "flagd"):
         meta = evaluate(f'local.deployments["{name}"].spec.template.metadata')
-        assert "annotations" not in meta and "admission.datadoghq.com/enabled" not in meta["labels"]
+        assert meta["annotations"] == {"ad.datadoghq.com/tags": '{"lab":"tt-lab-1"}'}
+        assert "admission.datadoghq.com/enabled" not in meta["labels"]
 
 
 def test_switches_land_on_exactly_the_listed_deployments(tmp_path):
@@ -58,11 +59,21 @@ def test_switches_land_on_exactly_the_listed_deployments(tmp_path):
     f.write_text("logs_off: [ts-news-service]\napm_off:\n  - tt-traffic-driver\n")
     env = {"TF_VAR_telemetry_file": str(f)}
     assert evaluate('local.deployments["ts-news-service"].spec.template.metadata.annotations', **env) == {
-        "ad.datadoghq.com/logs_exclude": "true"}
+        "ad.datadoghq.com/tags": '{"lab":"tt-lab-1"}', "ad.datadoghq.com/logs_exclude": "true"}
     assert evaluate('local.deployments["tt-traffic-driver"].spec.template.metadata.labels', **env) == {
         "app": "tt-traffic-driver", "admission.datadoghq.com/enabled": "false"}
     assert evaluate('local.deployments["ts-basic-service"].spec.template.metadata', **env) == {
-        "labels": {"app": "ts-basic-service"}}
+        "labels": {"app": "ts-basic-service"},
+        "annotations": {"ad.datadoghq.com/tags": '{"lab":"tt-lab-1"}'}}
+
+
+def test_every_pod_template_carries_the_lab_tag_annotation():
+    # Every pod the lab creates gets ad.datadoghq.com/tags, so the Agent tags its metrics, logs and
+    # traces with lab:<LAB_NAME> even when the Agent running on the node isn't this lab's.
+    deployments = evaluate("local.deployments")
+    assert len(deployments) == 46 + 2
+    for name, d in deployments.items():
+        assert d["spec"]["template"]["metadata"]["annotations"]["ad.datadoghq.com/tags"] == '{"lab":"tt-lab-1"}', name
 
 
 def test_unknown_names_are_reported(tmp_path):
@@ -111,3 +122,12 @@ def test_log_monitors_scope_the_driver_and_budget_is_a_daily_share():
     assert "service:tt-traffic-driver" in monitors["edge_5xx"]["expr"]
     assert '.by("@path")' in monitors["edge_5xx"]["expr"]
     assert monitors["apm_ingest_budget"]["critical"] == 5_000_000_000
+
+
+def test_k8s_and_log_scopes_key_off_the_lab_tag_not_cluster_or_namespace():
+    # Two labs in one Datadog org must not see each other's metrics or logs.
+    monitors = evaluate("local.monitors")
+    assert "lab:tt-lab-1" in monitors["oom_killed"]["expr"]
+    assert "kube_cluster_name" not in monitors["oom_killed"]["expr"]
+    assert "kube_namespace:train-ticket" not in monitors["oom_killed"]["expr"]
+    assert "lab:tt-lab-1 service:tt-traffic-driver" in monitors["edge_5xx"]["expr"]
