@@ -295,7 +295,7 @@ def test_down_runs_native_reset_first_then_terraform(lab):
     order = [c[0] if c[0] != "terraform" else f"terraform {c[2]}" for c in calls
              if c[0] in ("make", "terraform") and (c[0] == "make" or c[2] in ("destroy",))]
     assert order[0] == "make" and "terraform destroy" in order
-    assert ["exists", str(lab.path / "deployment/kubernetes-manifests/quickstart-k8s/yamls/deploy.yaml"), True] in calls
+    assert ["exists", str(lab.path / "deployment/kubernetes-manifests/quickstart-k8s/yamls/deploy.yaml"), False] in calls
     assert not (lab.path / "deployment/kubernetes-manifests/quickstart-k8s/yamls/deploy.yaml").exists()
     assert "PASS D3: Agent not installed by this lab; left alone" in r.stdout
     assert "DOWN PASS lab=tt-lab-1" in r.stdout

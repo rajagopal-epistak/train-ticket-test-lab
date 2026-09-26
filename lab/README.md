@@ -112,7 +112,7 @@ The report lines give detection and recovery times, whether the APM Voucher erro
 
 | Id | Checks or does |
 |---|---|
-| D1 | the repo's native teardown: generates `deploy.yaml` the way `make deploy` does, runs `make reset-deploy Namespace=train-ticket`, then removes the generated file. A `deploy.yaml` you created is kept. |
+| D1 | the repo's native teardown: `make reset-deploy Namespace=train-ticket`. The tracked `sw_deploy.yaml` already names the 46 Deployments, so no `deploy.yaml` is generated; a `deploy.yaml` you created yourself is left untouched. |
 | D2 | Terraform destroys stage `lab`: what the native reset misses (the `tsdb` release, flagd, the driver), the monitors, and namespace `train-ticket` with its volumes |
 | D3 | Terraform destroys stage `datadog`, only if this lab installed the Agent. Any other Agent is left alone. |
 | D4 | the namespaces and webhook are gone, and no monitor tagged `lab:<LAB_NAME>` remains |

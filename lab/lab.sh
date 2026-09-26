@@ -10,10 +10,8 @@ NS=train-ticket
 DD_NS=datadog
 FLAG_FAULTS="F1 F7 F12 F14 F17 F22"
 F3_SERVICES="ts-train-service ts-basic-service ts-order-service ts-order-other-service"
-DEPLOY_YAML="$REPO/deployment/kubernetes-manifests/quickstart-k8s/yamls/deploy.yaml"
 AGENT_IMAGE_RE='^(registry\.datadoghq\.com|(eu\.|asia\.)?gcr\.io/datadoghq|public\.ecr\.aws/datadog|datadoghq\.azurecr\.io|(docker\.io/)?datadog)/agent(:|@|$)'
 PINNED_KUBECONFIG=""
-GENERATED_DEPLOY_YAML=""
 F22_ON=""
 
 pass() { echo "PASS $1${2:+: $2}"; }
@@ -32,7 +30,6 @@ poll() {
 
 cleanup() {
   if [ -n "$F22_ON" ]; then "$REPO/lab/fault.sh" off F22 || true; fi
-  if [ -n "$GENERATED_DEPLOY_YAML" ]; then rm -f "$DEPLOY_YAML"; fi
   if [ -n "$PINNED_KUBECONFIG" ]; then rm -f "$PINNED_KUBECONFIG"; fi
 }
 
@@ -480,17 +477,10 @@ cmd_test() {
   echo "TEST PASS lab=$LAB_NAME"
 }
 
+# yamls/sw_deploy.yaml is tracked and names the same 46 Deployments as deploy.yaml.sample, so
+# `make reset-deploy`'s own `kubectl delete -f yamls -n <ns>` already removes them; no deploy.yaml needed.
 native_reset() {
-  if [ ! -e "$DEPLOY_YAML" ]; then
-    GENERATED_DEPLOY_YAML=1
-    (cd "$REPO" && source hack/deploy/utils.sh && update_tt_dp_cm nacos rabbitmq)
-  fi
   (cd "$REPO" && make reset-deploy Namespace="$NS") >"${TMPDIR:-/tmp}/lab-native-reset.log" 2>&1 || true
-  if [ -n "$GENERATED_DEPLOY_YAML" ]; then
-    rm -f "$DEPLOY_YAML"
-    [ ! -e "$DEPLOY_YAML" ] || fail D1 "could not remove the generated $DEPLOY_YAML"
-    GENERATED_DEPLOY_YAML=""
-  fi
   pass D1 "native make reset-deploy ran (log: ${TMPDIR:-/tmp}/lab-native-reset.log)"
 }
 
