@@ -299,7 +299,7 @@ faults_off() {
   for f in $active; do
     NAMESPACE="$NS" "$REPO/lab/fault.sh" off "$f" >/dev/null || fail S2 "could not switch $f off"
   done
-  pass S2 "faults off before apply${active:+ (switched off: $active)}"
+  pass S2 "faults off${active:+ (switched off: $active)}"
 }
 
 g2_rollout() {
@@ -473,6 +473,10 @@ cmd_test() {
   APM_ID=$(monitor_id voucher_errors)
   [ -n "$EDGE_ID" ] || fail T0 "no edge_5xx monitor in the lab state; run up first"
   pass T0 "monitors found"
+
+  # A SIGKILL (including an agent tool's timeout) can't be trapped, so a prior test run may have left F22
+  # on. Clear it, and anything else active, before the baseline check below.
+  faults_off
 
   STEP=T1
   poll 1200 30 voucher_not_alert || fail T1 "edge 5xx on /getVoucher is already alerting before the test"

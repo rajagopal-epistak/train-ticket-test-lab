@@ -361,6 +361,21 @@ def test_f22_not_detected_fails_and_still_switches_the_fault_off(lab):
     assert faults == ["fault.sh on F22", "fault.sh off F22"]
 
 
+def test_test_clears_a_leftover_f22_before_the_baseline_check(lab):
+    # A SIGKILL can't be trapped, so a prior test run may have left F22 on. test must clear it (S2's
+    # faults_off logic) before T1's baseline check, not just at the end of a run that completes normally.
+    rules = with_curl(
+        {"match": ["monitor/11?group_states=all"], "seq": [group("OK"), group("OK"), group("Alert"), group("OK")]},
+        {"match": ["monitor/12"], "seq": [{"stdout": '{"overall_state": "OK"}'}, {"stdout": '{"overall_state": "Alert"}'}]},
+        {"match": ["monitor/11"], "stdout": '{"overall_state": "OK"}'},
+    )
+    rules["kubectl"] = [{"match": ["configmap", "flagd-config"], "stdout": FLAGS_ON_22_AND_5}]
+    r = lab.run("trap cleanup EXIT; cmd_test", rules)
+    assert r.returncode == 0, r.stderr
+    faults = [line for line in lab.log.read_text().splitlines() if line.startswith("fault.sh")]
+    assert faults == ["fault.sh off F22", "fault.sh on F22", "fault.sh off F22"]
+
+
 def test_test_refuses_when_driver_logs_are_off(lab):
     rules = {"terraform": [{"match": ["console"], "stdout": '"true"\n'}]}
     r = lab.run("cmd_test", rules)

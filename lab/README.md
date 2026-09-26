@@ -70,10 +70,14 @@ Every input is an environment variable. Keys are never written to a file, a comm
 export KUBE_CONTEXT=lab-ctx LAB_NAME=tt-lab-1 DD_SITE=datadoghq.eu
 export DD_API_KEY=... DD_APP_KEY=...
 export APM_HOSTS_BUDGET=4 APM_INGEST_GB_BUDGET=150
-lab/lab.sh up      # 20-40 min on a fresh cluster; safe to run again
-lab/lab.sh test    # 10-40 min: F22 on, wait for the alert, F22 off, wait for recovery
+lab/lab.sh up      # 20-40 min on a fresh cluster; up to about 2 h in the worst case; safe to run again
+lab/lab.sh test    # 10-40 min: F22 on, wait for the alert, F22 off, wait for recovery; up to about 55 min in the worst case
 lab/lab.sh down    # removes everything this lab created
 ```
+
+**Worst-case budgets**, if a run allows each wait to reach its full timeout before succeeding:
+- `up`: about 2 h — G1 up to 45 min (the Cluster Agent and node Agent rollouts, then the webhook), G2 up to 20 min plus 10 min per StatefulSet, G5 up to 20 min, G7 up to 30 min across its three checks.
+- `test`: about 55 min — T1 up to 20 min, T3 up to 15 min, T4 up to 15 min, plus the two `fault.sh` calls.
 
 Each step prints `PASS <id>` or `FAIL <id>: <reason>`, and the first FAIL stops the command with exit 1. A good `up` ends with `UP PASS lab=tt-lab-1 agent=installed apm=true`, `test` with `TEST PASS lab=tt-lab-1`, and `down` with `DOWN PASS lab=tt-lab-1`.
 
