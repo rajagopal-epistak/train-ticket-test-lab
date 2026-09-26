@@ -181,7 +181,7 @@ Names are deployment names: the 46 `ts-*` services, `tt-traffic-driver`, and `fl
 | G2 | a service can't start (often MySQL or Nacos still starting, or the quota) | `kubectl -n train-ticket get pods \| grep -v Running; kubectl -n train-ticket describe pod <pod>` |
 | G3 | MySQL not answering | `kubectl -n train-ticket exec tsdb-mysql-0 -- mysql -uroot -e 'SELECT 1'` |
 | G4 | a fault is still on, or flagd isn't serving | `lab/fault.sh status F22; kubectl -n train-ticket logs deploy/flagd` |
-| G5 | pods created before the webhook; `up` restarts them once | `kubectl -n train-ticket get pod -l app=ts-basic-service -o jsonpath='{.items[0].spec.initContainers[*].name}'` |
+| G5 | pods created before the webhook; `up` restarts them once | `kubectl -n train-ticket get pod -l app=ts-basic-service --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].spec.initContainers[*].name}'` |
 | G6 | the driver can't reach the dashboard, or its image didn't pull | `kubectl -n train-ticket logs deploy/tt-traffic-driver --tail=20` |
 | G7 | Datadog isn't receiving data; check the Agent status | `kubectl -n datadog exec ds/datadog-agent -- agent status` |
 | G7 | kubelet or Kubernetes metrics missing on a distribution needing TLS verification off | re-run `up` with `KUBELET_TLS_VERIFY=false` |

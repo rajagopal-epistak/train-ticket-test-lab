@@ -221,6 +221,21 @@ def test_err_trap_catches_monitor_ids_lookup_failure_before_up_ran(lab):
     assert r.returncode == 1 and "FAIL T0" in r.stderr
 
 
+def test_err_trap_is_silent_when_a_command_substitution_failure_is_handled(lab):
+    # errtrace carries the trap into $(...), but not the caller's `|| ...`: only the top level may report.
+    r = lab.run('trap on_err ERR; x=$(false) || x=handled; echo "x=$x"', {})
+    assert r.returncode == 0, r.stderr
+    assert "x=handled" in r.stdout
+    assert "FAIL" not in r.stderr
+
+
+def test_err_trap_reports_an_unhandled_command_substitution_failure_once(lab):
+    r = lab.run("trap on_err ERR; STEP=G3; v=$(false); echo unreachable", {})
+    assert r.returncode == 1
+    assert r.stderr.count("FAIL") == 1 and "FAIL G3" in r.stderr
+    assert "unreachable" not in r.stdout
+
+
 def test_telemetry_names_must_be_known(lab):
     rules = {"terraform": [{"match": ["console"], "stdout": '"[\\"ts-bogus\\"]"\n'}]}
     r = lab.run("p6_telemetry", rules)
@@ -357,6 +372,16 @@ def test_g5_fallback_waits_for_ts_basic_service_rollout_not_all_deployments(lab)
     assert "PASS G5" in r.stdout
 
 
+def test_g5_samples_the_newest_ts_basic_service_pod(lab):
+    # After a rollout the old, uninjected pod can still be listed while it terminates; items[0] may be that pod.
+    rules = {"kubectl": [{"match": ["get", "pods", "app=ts-basic-service"], "stdout": "datadog-init"}]}
+    r = lab.run("g5_apm", rules, env={**INPUTS, "APM_ENABLED": "true", "INSTALL_AGENT": "true"})
+    assert r.returncode == 0, r.stderr
+    call = next(c for c in lab.calls() if c[0] == "kubectl" and "app=ts-basic-service" in c)
+    assert "--sort-by=.metadata.creationTimestamp" in call
+    assert any(a.startswith("jsonpath={.items[-1:]") for a in call)
+
+
 def test_datadog_keys_travel_on_stdin_never_argv(lab):
     rules = {"curl": [{"match": ["/api/v1/validate"], "stdout": '{"valid": true}'},
                       {"match": ["/api/v1/monitor"], "stdout": "[]"}]}
@@ -369,6 +394,17 @@ def test_datadog_keys_travel_on_stdin_never_argv(lab):
 def test_invalid_api_key_fails(lab):
     r = lab.run("p3_keys", {"curl": [{"match": ["/api/v1/validate"], "stdout": '{"errors": ["Forbidden"]}', "http": 403}]})
     assert r.returncode == 1 and "FAIL P3" in r.stderr
+
+
+def test_p3_app_key_check_paginates_explicitly(lab):
+    # page_size alone is ignored by the API (it returns every monitor in the org); page=0 makes it apply,
+    # so a large org's monitor list can't make this check hit the 30s curl timeout.
+    rules = {"curl": [{"match": ["/api/v1/validate"], "stdout": '{"valid": true}'},
+                      {"match": ["/api/v1/monitor"], "stdout": "[]"}]}
+    r = lab.run("p3_keys", rules)
+    assert r.returncode == 0, r.stderr
+    call = next(c for c in lab.calls() if c[0] == "curl" and "/api/v1/monitor" in c[-1])
+    assert "page=0" in call[-1] and "page_size=1" in call[-1]
 
 
 def test_driver_logs_seen_scopes_the_query_to_this_lab(lab):

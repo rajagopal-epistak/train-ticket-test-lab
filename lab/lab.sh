@@ -20,8 +20,11 @@ fail() { echo "FAIL $1: $2" >&2; exit 1; }
 now() { date +%s; }
 # Backstop for a command that fails without going through an explicit `|| fail ID ...`: -E (errtrace) makes
 # this trap follow into functions and command substitutions, so nothing under set -e exits silently.
+# Inside a subshell or command substitution it only exits: the caller's `|| ...` may be handling the failure,
+# and if it isn't, the top-level trap reports it once.
 on_err() {
   local status=$?
+  if [ "$BASH_SUBSHELL" -gt 0 ]; then exit "$status"; fi
   trap - ERR
   fail "${STEP:-?}" "unexpected error (exit $status): $BASH_COMMAND"
 }
@@ -118,7 +121,8 @@ p3_keys() {
   STEP=P3
   dd_call GET /api/v1/validate | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("valid") else 1)' ||
     fail P3 "DD_API_KEY is not valid for $DD_SITE"
-  dd_call GET "/api/v1/monitor?page_size=1" >/dev/null || fail P3 "DD_APP_KEY cannot read monitors on $DD_SITE"
+  # page_size alone is ignored (the API returns every monitor in the org without page); page=0 makes it apply.
+  dd_call GET "/api/v1/monitor?page=0&page_size=1" >/dev/null || fail P3 "DD_APP_KEY cannot read monitors on $DD_SITE"
   pass P3 "Datadog keys"
 }
 
@@ -256,9 +260,11 @@ stage_datadog() {
   STEP=S1
   kubectl create namespace "$DD_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl label namespace "$DD_NS" --overwrite lab="$LAB_NAME" pod-security.kubernetes.io/enforce=privileged >/dev/null
+  # --server-side, not the default client-side apply, so the keys don't land a second time in the
+  # last-applied-configuration annotation.
   kubectl -n "$DD_NS" create secret generic datadog-secret \
     --from-env-file=<(printf 'api-key=%s\napp-key=%s\n' "$DD_API_KEY" "$DD_APP_KEY") \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    --dry-run=client -o yaml | kubectl apply --server-side -f - >/dev/null
   tf datadog apply -input=false -auto-approve || fail S1 "terraform apply of stage datadog failed"
   pass S1 "Datadog Operator and Agent applied"
   STEP=G1
@@ -344,7 +350,9 @@ g4_faults() {
 }
 
 sample_pod_injected() {
-  kubectl -n "$NS" get pods -l app=ts-basic-service -o jsonpath='{.items[0].spec.initContainers[*].name}' | grep -q datadog
+  # The newest pod: right after a rollout the old, uninjected pod can still be listed while it terminates.
+  kubectl -n "$NS" get pods -l app=ts-basic-service --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1:].spec.initContainers[*].name}' | grep -q datadog
 }
 
 g5_apm() {
