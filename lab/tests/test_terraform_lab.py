@@ -88,6 +88,12 @@ def test_others_have_no_stringdata_and_secrets_carry_base64_data():
     assert "data" in configmap and "stringData" not in configmap
 
 
+def test_oom_killed_monitor_watches_last_state():
+    expr = evaluate("local.monitors")["oom_killed"]["expr"]
+    assert "kubernetes.containers.last_state.terminated" in expr
+    assert "kubernetes.containers.state.terminated" not in expr
+
+
 def test_log_monitors_scope_the_driver_and_budget_is_a_daily_share():
     monitors = evaluate("local.monitors")
     assert "service:tt-traffic-driver" in monitors["edge_5xx"]["expr"]

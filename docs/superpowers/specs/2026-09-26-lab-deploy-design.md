@@ -356,3 +356,4 @@ The plan's code was written and tested in a scratch clone before the plan. That 
 ## Review amendments (fix round, 2026-09-26)
 
 1. **H1:** `down`'s D3 also deletes `mutatingwebhookconfiguration datadog-webhook --ignore-not-found`, since neither Terraform nor the Helm chart removes it. The lost-state teardown gets the same step.
+2. **M1:** the OOMKilled monitor queries `kubernetes.containers.last_state.terminated{reason:oomkilled}`, not `state.terminated`: an OOM-killed container restarts, so its current state is Waiting/CrashLoopBackOff, and the reason lives in `lastState`.

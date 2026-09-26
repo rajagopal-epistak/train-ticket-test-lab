@@ -28,7 +28,9 @@ locals {
   base_monitors = {
     oom_killed = {
       name = "OOMKilled by deployment", type = "query alert", critical = 1
-      expr = "max(last_10m):max:kubernetes.containers.state.terminated{${local.k8s_scope},reason:oomkilled} by {kube_deployment}"
+      # An OOM-killed container restarts, so its current state is Waiting/CrashLoopBackOff, not Terminated;
+      # the reason lives in the kubelet's lastState, which last_state.terminated reports.
+      expr = "max(last_10m):max:kubernetes.containers.last_state.terminated{${local.k8s_scope},reason:oomkilled} by {kube_deployment}"
     }
     restarts = {
       name = "Restarts by deployment", type = "query alert", critical = 2

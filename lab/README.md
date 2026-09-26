@@ -127,7 +127,7 @@ All monitors are named `[<LAB_NAME>] …` and tagged `lab:<LAB_NAME>` and `manag
 | Voucher p95 latency | APM `trace.tornado.request` p95 > 2 s |
 | Java error rate by service | APM servlet errors ÷ hits > 10 %, per service |
 | Voucher error rate | APM Tornado errors ÷ hits > 10 % |
-| OOMKilled by deployment | a container terminated with `oomkilled` |
+| OOMKilled by deployment | a container's last termination reason was `oomkilled` |
 | Restarts by deployment | more than 2 restarts in 10 min |
 | Edge 5xx by path | driver outcomes with HTTP 500/502/503/504, more than 2 per path in 10 min |
 | Edge 4xx by path | driver outcomes with HTTP 400/401/403/404/413, more than 5 per path in 10 min |
