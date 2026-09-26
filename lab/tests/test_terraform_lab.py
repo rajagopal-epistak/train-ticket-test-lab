@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import subprocess
@@ -75,6 +76,16 @@ def test_apm_switch_drops_only_the_apm_monitors():
     assert on - off == {"java_latency", "voucher_latency", "java_errors", "voucher_errors"}
     assert off == {"edge_5xx", "edge_4xx", "business_rejections", "fare_anomaly", "oom_killed", "restarts",
                    "apm_hosts_budget", "apm_ingest_budget"}
+
+
+def test_others_have_no_stringdata_and_secrets_carry_base64_data():
+    others = evaluate("local.others")
+    for key, manifest in others.items():
+        assert "stringData" not in manifest, key
+    secret = evaluate('local.others["Secret/ts-assurance-mysql"]')
+    assert secret["data"]["ASSURANCE_MYSQL_HOST"] == base64.b64encode(b"tsdb-mysql-leader").decode()
+    configmap = evaluate('local.others["ConfigMap/flagd-config"]')
+    assert "data" in configmap and "stringData" not in configmap
 
 
 def test_log_monitors_scope_the_driver_and_budget_is_a_daily_share():

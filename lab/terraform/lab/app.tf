@@ -48,10 +48,14 @@ locals {
     })
   }
 
+  # kubernetes_manifest plans stringData as given, but the API never returns it (the server moves it into data),
+  # so Terraform sees an inconsistent result after apply. Send Secrets as data (base64), never stringData.
   others = {
-    for d in local.other_docs : "${d.kind}/${d.metadata.name}" => merge(d, {
-      metadata = merge(d.metadata, { namespace = "train-ticket" })
-    })
+    for d in local.other_docs : "${d.kind}/${d.metadata.name}" => merge(
+      { for k, v in d : k => v if k != "stringData" },
+      { metadata = merge(d.metadata, { namespace = "train-ticket" }) },
+      { for k, v in { data = merge(try(d.data, {}), { for sk, sv in try(d.stringData, {}) : sk => base64encode(sv) }) } : k => v if can(d.stringData) },
+    )
   }
 
   unknown_services = sort(tolist(setsubtract(setunion(local.logs_off, local.apm_off), keys(local.deployments))))
