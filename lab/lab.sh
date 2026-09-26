@@ -318,7 +318,10 @@ g5_apm() {
   fi
   if ! sample_pod_injected; then
     kubectl -n "$NS" rollout restart deployment >/dev/null
-    kubectl -n "$NS" wait --for=condition=Available deployment --all --timeout=1200s >/dev/null || fail G5 "deployments not available after restart"
+    # replicas:1 keeps the old pod Available throughout a restart (maxUnavailable rounds to 0), so
+    # `wait --for=condition=Available` returns at once; rollout status on the sampled deployment
+    # actually waits for its new pod to replace the old one.
+    kubectl -n "$NS" rollout status deployment/ts-basic-service --timeout=1200s >/dev/null || fail G5 "ts-basic-service rollout did not complete"
     sample_pod_injected || fail G5 "ts-basic-service pod has no Datadog init container"
   fi
   pass G5 "APM injected into ts-basic-service"

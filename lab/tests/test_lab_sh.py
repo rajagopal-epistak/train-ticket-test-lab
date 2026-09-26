@@ -208,6 +208,21 @@ def test_mysql_non_numeric_answer_fails(lab):
     assert r.returncode == 1 and "FAIL G3" in r.stderr
 
 
+def test_g5_fallback_waits_for_ts_basic_service_rollout_not_all_deployments(lab):
+    # replicas:1 with the default RollingUpdate (maxUnavailable=0, maxSurge=1) keeps the old pod Available
+    # throughout the restart, so `kubectl wait --for=condition=Available --all` returns at once; only
+    # `rollout status` on the one deployment we sample actually waits for the new pod to replace the old.
+    rules = {"kubectl": [
+        {"match": ["get", "pods", "app=ts-basic-service"], "seq": [{"exit": 1}, {"stdout": "datadog-init"}]},
+    ]}
+    r = lab.run("g5_apm", rules, env={**INPUTS, "APM_ENABLED": "true", "INSTALL_AGENT": "true"})
+    assert r.returncode == 0, r.stderr
+    calls = lab.calls()
+    assert any(c[0] == "kubectl" and "rollout" in c and "status" in c and "deployment/ts-basic-service" in c for c in calls)
+    assert not any("--for=condition=Available" in c for c in calls)
+    assert "PASS G5" in r.stdout
+
+
 def test_datadog_keys_travel_on_stdin_never_argv(lab):
     rules = {"curl": [{"match": ["/api/v1/validate"], "stdout": '{"valid": true}'},
                       {"match": ["/api/v1/monitor"], "stdout": "[]"}]}
