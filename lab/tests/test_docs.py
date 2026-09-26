@@ -21,7 +21,7 @@ def test_readme_and_script_agree_on_the_fault_list():
 def test_readme_documents_every_input_and_command():
     loop = re.search(r"for v in ([A-Z_ ]+); do", LAB_SH)
     assert loop, "require_inputs loop not found"
-    inputs = loop.group(1).split() + ["APM_ENABLED"]
+    inputs = loop.group(1).split() + ["APM_ENABLED", "KUBELET_TLS_VERIFY"]
     for name in inputs:
         assert f"| `{name}` |" in README, name
     for command in ("lab/lab.sh up", "lab/lab.sh test", "lab/lab.sh down"):

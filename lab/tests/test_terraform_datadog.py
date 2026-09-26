@@ -7,7 +7,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 STAGE = REPO / "lab" / "terraform" / "datadog"
 VARS = {"TF_VAR_kubeconfig": "/nonexistent", "TF_VAR_lab_name": "tt-lab-1", "TF_VAR_dd_site": "datadoghq.eu",
-        "TF_VAR_apm_enabled": "true"}
+        "TF_VAR_apm_enabled": "true", "TF_VAR_kubelet_tls_verify": "true"}
 
 
 def terraform(*args):
@@ -50,3 +50,13 @@ def test_agent_chart_renders_the_documented_fields():
 def test_agent_chart_requires_a_lab_name():
     r = helm_template("x", str(STAGE / "agent-chart"))
     assert r.returncode != 0 and "labName is required" in r.stderr
+
+
+def test_kubelet_tls_verify_renders_true_and_false():
+    for value, expected in (("true", True), ("false", False)):
+        r = helm_template("datadog-agent", str(STAGE / "agent-chart"), "-n", "datadog",
+                          "--set", "labName=tt-lab-1", "--set", "site=datadoghq.eu", "--set", "apmEnabled=false",
+                          "--set", f"kubeletTlsVerify={value}")
+        assert r.returncode == 0, r.stderr
+        agent = yaml.safe_load(r.stdout)
+        assert agent["spec"]["global"]["kubelet"]["tlsVerify"] is expected, value

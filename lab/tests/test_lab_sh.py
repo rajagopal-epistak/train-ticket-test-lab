@@ -82,6 +82,12 @@ def test_apm_enabled_defaults_to_true_and_rejects_other_values(lab):
     assert r.returncode == 1 and "APM_ENABLED" in r.stderr
 
 
+def test_kubelet_tls_verify_defaults_to_true_and_rejects_other_values(lab):
+    assert "TLS=true" in lab.run('require_inputs; echo "TLS=$KUBELET_TLS_VERIFY"', {}).stdout
+    r = lab.run("require_inputs", {}, env={**INPUTS, "KUBELET_TLS_VERIFY": "maybe"})
+    assert r.returncode == 1 and "KUBELET_TLS_VERIFY" in r.stderr
+
+
 def daemonsets(*items):
     return json.dumps({"items": [
         {"metadata": {"namespace": ns, "name": name, "labels": labels},

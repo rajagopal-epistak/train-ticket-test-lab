@@ -20,9 +20,10 @@ resource "helm_release" "agent" {
   wait      = true
   timeout   = 600
   values = [yamlencode({
-    labName    = var.lab_name
-    site       = var.dd_site
-    apmEnabled = var.apm_enabled
+    labName          = var.lab_name
+    site             = var.dd_site
+    apmEnabled       = var.apm_enabled
+    kubeletTlsVerify = var.kubelet_tls_verify
   })]
   depends_on = [helm_release.operator]
 }

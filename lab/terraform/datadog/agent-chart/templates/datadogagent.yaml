@@ -10,6 +10,8 @@ spec:
     tags:
       - {{ printf "env:%s" .Values.labName | quote }}
       - {{ printf "lab:%s" .Values.labName | quote }}
+    kubelet:
+      tlsVerify: {{ .Values.kubeletTlsVerify }}
     credentials:
       apiSecret:
         secretName: datadog-secret

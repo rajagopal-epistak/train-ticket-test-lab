@@ -17,3 +17,8 @@ variable "apm_enabled" {
   description = "Single Step Instrumentation for namespace train-ticket."
   type        = bool
 }
+
+variable "kubelet_tls_verify" {
+  description = "global.kubelet.tlsVerify. false is required on OpenShift, Rancher, VMware VKS/TKG and AKS."
+  type        = bool
+}

@@ -2,7 +2,7 @@
 
 This fork is xlab-uiuc/train-ticket (FudanSELab/train-ticket plus flagd-guarded faults), with eight wiki faults made switchable and a steady traffic driver, monitored with Datadog.
 
-One command stands the lab up on any x86_64 Kubernetes cluster:
+One command stands the lab up on an x86_64 Kubernetes cluster (some managed distributions need `KUBELET_TLS_VERIFY=false`; see Inputs):
 - the Datadog Agent, unless one is already there;
 - Train-Ticket;
 - flagd and the traffic driver;
@@ -60,6 +60,9 @@ Every input is an environment variable. Keys are never written to a file, a comm
 | `APM_HOSTS_BUDGET` | yes | `4` | the APM hosts budget monitor alerts above this |
 | `APM_INGEST_GB_BUDGET` | yes | `150` | monthly ingested-span budget in GB; the monitor alerts when a day exceeds budget ÷ 30 |
 | `APM_ENABLED` | no (`true`) | `false` | `false` turns off APM injection and the APM monitors |
+| `KUBELET_TLS_VERIFY` | no (`true`) | `false` | `global.kubelet.tlsVerify`; some distributions need `false` (below) |
+
+**`KUBELET_TLS_VERIFY`:** per [docs.datadoghq.com/containers/kubernetes/distributions](https://docs.datadoghq.com/containers/kubernetes/distributions/), OpenShift, Rancher, VMware VKS/TKG and AKS need `false` (AKS's `hostCAPath` alternative isn't supported here); EKS, GKE and OKE need no change. kind, minikube and k3s aren't covered by that page: leave it `true` first, and if `G7` fails on kubelet or Kubernetes metrics, re-run `up` with `KUBELET_TLS_VERIFY=false`. It only affects an Agent this lab installs; it's ignored when a foreign Agent is present.
 
 ## Run
 
@@ -177,6 +180,7 @@ Names are deployment names: the 46 `ts-*` services, `tt-traffic-driver`, and `fl
 | G5 | pods created before the webhook; `up` restarts them once | `kubectl -n train-ticket get pod -l app=ts-basic-service -o jsonpath='{.items[0].spec.initContainers[*].name}'` |
 | G6 | the driver can't reach the dashboard, or its image didn't pull | `kubectl -n train-ticket logs deploy/tt-traffic-driver --tail=20` |
 | G7 | Datadog isn't receiving data; check the Agent status | `kubectl -n datadog exec ds/datadog-agent -- agent status` |
+| G7 | kubelet or Kubernetes metrics missing on a distribution needing TLS verification off | re-run `up` with `KUBELET_TLS_VERIFY=false` |
 | T0 | `up` hasn't run for this `LAB_NAME`, or the driver's logs are switched off | `terraform -chdir=lab/terraform/lab output monitor_ids` |
 | T1 | `/getVoucher` is already failing | `kubectl -n train-ticket logs deploy/ts-voucher-service --tail=50` |
 | T2, T4 | flagd didn't pick up the flag | `lab/fault.sh status F22` |

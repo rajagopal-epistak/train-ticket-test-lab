@@ -1,4 +1,5 @@
 labName: ""
 site: datadoghq.com
 apmEnabled: true
+kubeletTlsVerify: true
 agentVersion: "7.83.3"

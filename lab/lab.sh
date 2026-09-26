@@ -51,6 +51,8 @@ require_inputs() {
   [[ "$LAB_NAME" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]] || fail P0 "LAB_NAME must be lowercase letters, digits and dashes (max 40)"
   APM_ENABLED="${APM_ENABLED:-true}"
   case "$APM_ENABLED" in true | false) ;; *) fail P0 "APM_ENABLED must be true or false" ;; esac
+  KUBELET_TLS_VERIFY="${KUBELET_TLS_VERIFY:-true}"
+  case "$KUBELET_TLS_VERIFY" in true | false) ;; *) fail P0 "KUBELET_TLS_VERIFY must be true or false" ;; esac
   pass P0 "inputs"
 }
 
@@ -161,7 +163,8 @@ tf_eval() {
 export_tf_vars() {
   export TF_VAR_kubeconfig="$KUBECONFIG" TF_VAR_lab_name="$LAB_NAME" TF_VAR_dd_site="$DD_SITE" \
     TF_VAR_apm_enabled="$APM_ENABLED" TF_VAR_apm_hosts_budget="$APM_HOSTS_BUDGET" \
-    TF_VAR_apm_ingest_gb_budget="$APM_INGEST_GB_BUDGET" TF_VAR_telemetry_file="$REPO/lab/telemetry.yaml"
+    TF_VAR_apm_ingest_gb_budget="$APM_INGEST_GB_BUDGET" TF_VAR_telemetry_file="$REPO/lab/telemetry.yaml" \
+    TF_VAR_kubelet_tls_verify="$KUBELET_TLS_VERIFY"
 }
 
 p6_telemetry() {
