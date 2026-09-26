@@ -44,6 +44,10 @@ resource "terraform_data" "mysql_root_ipv6" {
       pods=$(kubectl -n train-ticket get pods -l release="$RELEASE" -o name)
       [ -n "$pods" ] || { echo "no pods for MySQL release $RELEASE" >&2; exit 1; }
       for pod in $pods; do
+        # Skip pods that have it: once a leader exists, xenon makes followers super_read_only (ERROR 1290).
+        has=$(kubectl -n train-ticket exec "$pod" -c mysql -- mysql -uroot -N -e \
+          "SELECT COUNT(*) FROM mysql.user WHERE user='root' AND host='::1'")
+        [ "$has" = 1 ] && continue
         kubectl -n train-ticket exec "$pod" -c mysql -- mysql -uroot -e \
           "SET SESSION sql_log_bin=0; CREATE USER IF NOT EXISTS 'root'@'::1'; GRANT ALL PRIVILEGES ON *.* TO 'root'@'::1' WITH GRANT OPTION;"
       done

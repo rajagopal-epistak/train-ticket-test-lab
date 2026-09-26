@@ -161,3 +161,32 @@ def test_mysql_gets_a_root_account_for_ipv6_loopback_before_its_consumers():
     assert 'terraform_data.mysql_root_ipv6["nacosdb"]' in nacos
     deployments = re.search(r'resource "kubernetes_manifest" "deployments" \{(.*?)\n\}', text, re.S).group(1)
     assert "terraform_data.mysql_root_ipv6" in deployments
+
+
+def mysql_root_ipv6_script():
+    infra = (STAGE / "infra.tf").read_text()
+    body = re.search(r'resource "terraform_data" "mysql_root_ipv6" \{.*?command\s*=\s*<<-EOT\n(.*?)\n\s*EOT', infra, re.S).group(1)
+    lines = body.splitlines()
+    indent = min(len(line) - len(line.lstrip()) for line in lines if line.strip())
+    return "\n".join(line[indent:] for line in lines)
+
+
+@pytest.mark.parametrize("has_account, creates", [("1", False), ("0", True)])
+def test_mysql_root_ipv6_step_skips_pods_that_already_have_the_account(tmp_path, has_account, creates):
+    # Live run: on a re-run the cluster has a leader and xenon makes followers super_read_only, so CREATE USER fails
+    # there (ERROR 1290) even though the account is already present from the first run.
+    log = tmp_path / "kubectl.log"
+    kubectl = tmp_path / "kubectl"
+    kubectl.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$*" >> {log}\n'
+        'case "$*" in\n'
+        '  *"get pods"*) printf "pod/tsdb-mysql-0\\npod/tsdb-mysql-1\\n" ;;\n'
+        f'  *"SELECT COUNT"*) echo {has_account} ;;\n'
+        "esac\n")
+    kubectl.chmod(0o755)
+    r = subprocess.run(["bash", "-c", mysql_root_ipv6_script()], capture_output=True, text=True,
+                       env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "RELEASE": "tsdb"})
+    assert r.returncode == 0, r.stderr
+    created = [line for line in log.read_text().splitlines() if "CREATE USER" in line]
+    assert len(created) == (2 if creates else 0)
