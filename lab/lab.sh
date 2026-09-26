@@ -90,7 +90,8 @@ for n in json.load(sys.stdin)["items"]:
     ready = any(c["type"] == "Ready" and c["status"] == "True" for c in n["status"]["conditions"])
     arch = n["metadata"]["labels"].get("kubernetes.io/arch")
     if not ready or arch != "amd64":
-        bad.append(f"{n[\"metadata\"][\"name\"]} ready={ready} arch={arch}")
+        name = n["metadata"]["name"]
+        bad.append(f"{name} ready={ready} arch={arch}")
 print("; ".join(bad))
 sys.exit(1 if bad else 0)') || fail P2 "nodes not usable: $bad"
   kubectl get storageclass -o json | python3 -c '

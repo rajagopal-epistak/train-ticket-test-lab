@@ -1,7 +1,9 @@
 import json
 import os
 import shutil
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -40,15 +42,22 @@ def lab(tmp_path):
         log = tmp_path / "calls.log"
         rules_file = tmp_path / "rules.json"
 
-        def run(self, script, rules, env=INPUTS):
+        def _env(self, rules, env):
             self.rules_file.write_text(json.dumps(rules))
             self.log.write_text("")
-            full_env = {
+            return {
                 "PATH": f"{bin_dir}:{os.environ['PATH']}", "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
                 "STUB_RULES": str(self.rules_file), "STUB_LOG": str(self.log), "STUB_STATE": str(state), **env,
             }
+
+        def run(self, script, rules, env=INPUTS):
             return subprocess.run(["bash", "-c", f'source "{root}/lab/lab.sh"; {script}'],
-                                  env=full_env, capture_output=True, text=True)
+                                  env=self._env(rules, env), capture_output=True, text=True)
+
+        def popen(self, script, rules, env=INPUTS):
+            """Like run, but returns a live Popen so a test can signal the process mid-run."""
+            return subprocess.Popen(["bash", "-c", f'source "{root}/lab/lab.sh"; {script}'],
+                                    env=self._env(rules, env), text=True)
 
         def calls(self):
             return [json.loads(line) for line in self.log.read_text().splitlines()]
@@ -251,6 +260,63 @@ def test_faults_off_switches_off_only_what_is_on(lab):
     assert "off F3" not in lab.log.read_text()
 
 
+def up_sequencing_rules(train_ticket_owner):
+    """Rules for a cmd_up run that reaches S2/S3 with a foreign Agent (so stage_datadog never runs) and
+    fails S3's apply immediately, so G2 onward need no stubbing at all."""
+    if train_ticket_owner == "absent":
+        owner_rules = [{"match": ["get", "namespace", "train-ticket"], "exit": 1}]
+    else:
+        owner_rules = [
+            {"match": ["get", "namespace", "train-ticket", "jsonpath"], "stdout": train_ticket_owner},
+            {"match": ["get", "namespace", "train-ticket"], "exit": 0},
+        ]
+    kubectl_rules = [
+        *owner_rules,
+        {"match": ["get", "nodes", "-o", "json"], "stdout": json.dumps({"items": [
+            {"metadata": {"name": "node-a", "labels": {"kubernetes.io/arch": "amd64"}},
+             "status": {"conditions": [{"type": "Ready", "status": "True"}]}}]})},
+        {"match": ["get", "storageclass"], "stdout": json.dumps({"items": [
+            {"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "true"}}}]})},
+        {"match": ["get", "daemonsets"], "stdout": daemonsets(
+            ("kube-system", "datadog", {}, "gcr.io/datadoghq/agent:7.83.3"))},
+    ]
+    if train_ticket_owner != "absent":
+        # Only queried if the namespace exists: an active F22 for faults_off (S2) to switch off.
+        kubectl_rules.append({"match": ["configmap", "flagd-config"], "stdout": FLAGS_ON_22_AND_5})
+    return {
+        "kubectl": kubectl_rules,
+        "terraform": [
+            {"match": ["version", "-json"], "stdout": json.dumps({"terraform_version": "1.16.4"})},
+            {"match": ["console"], "stdout": '"[]"\n'},
+            {"match": ["apply", "-auto-approve"], "exit": 1},
+        ],
+        "curl": [
+            {"match": ["/api/v1/validate"], "stdout": '{"valid": true}'},
+            {"match": ["/api/v1/monitor"], "stdout": "[]"},
+        ],
+    }
+
+
+def mixed_lines(lab):
+    """The raw call log, tolerant of the plain 'fault.sh ...' lines fault.sh's stub also appends."""
+    return [line if line.startswith("fault.sh") else json.loads(line) for line in lab.log.read_text().splitlines()]
+
+
+@pytest.mark.parametrize("owner, expect_fault_call", [("tt-lab-1", True), ("absent", False)])
+def test_up_runs_s2_before_s3_only_when_the_namespace_exists(lab, owner, expect_fault_call):
+    rules = up_sequencing_rules(owner)
+    r = lab.run("trap cleanup EXIT; cmd_up", rules, env={**INPUTS, "APM_ENABLED": "false"})
+    assert r.returncode == 1 and "FAIL S3" in r.stderr, r.stderr
+    calls = mixed_lines(lab)
+    fault_calls = [c for c in calls if isinstance(c, str)]
+    if expect_fault_call:
+        assert fault_calls == ["fault.sh off F22"]
+        apply_index = next(i for i, c in enumerate(calls) if isinstance(c, list) and c[0] == "terraform" and "apply" in c)
+        assert calls.index("fault.sh off F22") < apply_index
+    else:
+        assert fault_calls == []
+
+
 @pytest.mark.parametrize("answers, sets", [(["151", "500"], 1), (["500"], 0)])
 def test_mysql_connections_are_raised_only_when_low(lab, answers, sets):
     rules = {"kubectl": [
@@ -376,6 +442,29 @@ def test_test_clears_a_leftover_f22_before_the_baseline_check(lab):
     assert faults == ["fault.sh off F22", "fault.sh on F22", "fault.sh off F22"]
 
 
+def test_t2_failure_still_switches_f22_off(lab):
+    fault = lab.path / "lab" / "fault.sh"
+    fault.write_text('#!/usr/bin/env bash\necho "fault.sh $*" >> "$STUB_LOG"\n'
+                      'case "$1" in on) echo "tt-feat-22 unexpected" ;; off) echo "tt-feat-22 false" ;; esac\n')
+    fault.chmod(0o755)
+    rules = with_curl({"match": ["monitor/11?group_states=all"], "stdout": group("OK")["stdout"]})
+    r = lab.run("trap cleanup EXIT; cmd_test", rules)
+    assert r.returncode == 1 and "FAIL T2" in r.stderr
+    assert "fault.sh off F22" in lab.log.read_text()
+
+
+def test_a_signal_mid_run_still_switches_f22_off(lab):
+    # SIGKILL, including an agent tool's timeout, can't be trapped. Any other signal can: bash still runs
+    # the EXIT trap before it dies, as long as it's blocked (not mid-syscall) when the signal arrives.
+    # /bin/sleep, not the stubbed one, so the process is genuinely blocked when the signal is sent.
+    p = lab.popen("trap cleanup EXIT; F22_ON=1; /bin/sleep 5", {})
+    time.sleep(0.5)
+    p.send_signal(signal.SIGTERM)
+    rc = p.wait(timeout=5)
+    assert rc != 0
+    assert "fault.sh off F22" in lab.log.read_text()
+
+
 def test_test_refuses_when_driver_logs_are_off(lab):
     rules = {"terraform": [{"match": ["console"], "stdout": '"true"\n'}]}
     r = lab.run("cmd_test", rules)
@@ -383,13 +472,19 @@ def test_test_refuses_when_driver_logs_are_off(lab):
     assert "fault.sh" not in lab.log.read_text()
 
 
-def down_rules(lab, datadog_state=""):
+def down_rules(lab, datadog_state="", train_ticket_owner="tt-lab-1", datadog_namespace_exit=1):
     deploy_yaml = str(lab.path / "deployment/kubernetes-manifests/quickstart-k8s/yamls/deploy.yaml")
+    if train_ticket_owner == "absent":
+        owner_rules = [{"match": ["get", "namespace", "train-ticket"], "exit": 1}]
+    else:
+        owner_rules = [
+            {"match": ["get", "namespace", "train-ticket", "jsonpath"], "stdout": train_ticket_owner},
+            {"match": ["get", "namespace", "train-ticket"], "seq": [{"exit": 0}, {"exit": 1}]},
+        ]
     return {
         "kubectl": [
-            {"match": ["get", "namespace", "train-ticket", "jsonpath"], "stdout": "tt-lab-1"},
-            {"match": ["get", "namespace", "train-ticket"], "seq": [{"exit": 0}, {"exit": 1}]},
-            {"match": ["get", "namespace", "datadog"], "exit": 1},
+            *owner_rules,
+            {"match": ["get", "namespace", "datadog"], "exit": datadog_namespace_exit},
             {"match": ["get", "mutatingwebhookconfiguration"], "exit": 1},
         ],
         "make": [{"match": ["reset-deploy", "Namespace=train-ticket"], "exists": deploy_yaml}],
@@ -417,6 +512,22 @@ def test_down_keeps_a_deploy_yaml_it_did_not_generate(lab):
     r = lab.run("trap cleanup EXIT; cmd_down", down_rules(lab))
     assert r.returncode == 0, r.stderr
     assert existing.read_text() == "# from an earlier make deploy\n"
+
+
+@pytest.mark.parametrize("label", ["other-lab", ""], ids=["foreign", "unlabelled"])
+def test_down_skips_native_reset_on_a_foreign_or_unlabelled_namespace(lab, label):
+    r = lab.run("trap cleanup EXIT; cmd_down", down_rules(lab, train_ticket_owner=label))
+    assert r.returncode == 0, r.stderr
+    assert not any(c[0] == "make" for c in lab.calls())
+    assert "DOWN PASS lab=tt-lab-1" in r.stdout
+
+
+def test_down_leaves_a_foreign_datadog_namespace_alone(lab):
+    r = lab.run("trap cleanup EXIT; cmd_down", down_rules(lab, datadog_namespace_exit=0))
+    assert r.returncode == 0, r.stderr
+    assert not any(c[0] == "kubectl" and c[1] == "delete" and "datadog" in " ".join(c) for c in lab.calls())
+    assert "PASS D3: Agent not installed by this lab; left alone" in r.stdout
+    assert "DOWN PASS lab=tt-lab-1" in r.stdout
 
 
 def test_down_destroys_the_agent_stage_only_when_it_is_ours(lab):
