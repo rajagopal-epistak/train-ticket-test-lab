@@ -1,0 +1,4 @@
+labName: ""
+site: datadoghq.com
+apmEnabled: true
+agentVersion: "7.83.3"

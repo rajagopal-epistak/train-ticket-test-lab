@@ -1,0 +1,5 @@
+apiVersion: v2
+name: tt-lab-datadog-agent
+description: The DatadogAgent resource for the Train-Ticket lab.
+type: application
+version: 0.1.0

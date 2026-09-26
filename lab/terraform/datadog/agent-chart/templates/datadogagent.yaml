@@ -1,0 +1,58 @@
+apiVersion: datadoghq.com/v2alpha1
+kind: DatadogAgent
+metadata:
+  name: datadog
+  namespace: {{ .Release.Namespace }}
+spec:
+  global:
+    clusterName: {{ required "labName is required" .Values.labName | quote }}
+    site: {{ .Values.site | quote }}
+    tags:
+      - {{ printf "env:%s" .Values.labName | quote }}
+      - {{ printf "lab:%s" .Values.labName | quote }}
+    credentials:
+      apiSecret:
+        secretName: datadog-secret
+        keyName: api-key
+      appSecret:
+        secretName: datadog-secret
+        keyName: app-key
+  features:
+    apm:
+      enabled: {{ .Values.apmEnabled }}
+      instrumentation:
+        enabled: {{ .Values.apmEnabled }}
+        targets:
+          - name: train-ticket
+            namespaceSelector:
+              matchNames: ["train-ticket"]
+            ddTraceVersions:
+              java: "1"
+              python: "4"
+            ddTraceConfigs:
+              - name: DD_SERVICE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['app']
+              - name: DD_ENV
+                value: {{ .Values.labName | quote }}
+              # Tornado is off by default in ddtrace ("Automatic: no"); inferred switch, measured on the first run.
+              - name: DD_TRACE_TORNADO_ENABLED
+                value: "true"
+    logCollection:
+      enabled: true
+      containerCollectAll: true
+    kubeStateMetricsCore:
+      enabled: true
+  override:
+    nodeAgent:
+      image:
+        tag: {{ .Values.agentVersion | quote }}
+      env:
+        - name: DD_CONTAINER_EXCLUDE_LOGS
+          value: "kube_namespace:.*"
+        - name: DD_CONTAINER_INCLUDE_LOGS
+          value: "kube_namespace:train-ticket"
+    clusterAgent:
+      image:
+        tag: {{ .Values.agentVersion | quote }}
