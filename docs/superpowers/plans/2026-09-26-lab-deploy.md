@@ -27,7 +27,7 @@
 
 ## Orchestration shape
 
-- **Build:** one dev agent (general-purpose, Sonnet, xhigh effort inherited from settings) runs Tasks 0–5 with superpowers:executing-plans; the session that owns this plan reviews its work before the deep review. The code is final and tested, so the build is a transcription plus a test run per task. Estimate: about 150–250k tokens.
+- **Build:** one dev agent (`senior-devops-engineer`: Sonnet, effort xhigh set in its definition) runs Tasks 0–5 with superpowers:executing-plans; the session that owns this plan reviews its work before the deep review. The code is final and tested, so the build is a transcription plus a test run per task. Estimate: about 150–250k tokens.
 - **Review:** one deep reviewer, Sonnet at xhigh effort, over the whole `master..lab/deploy` diff with the spec. Estimate: 300–400k tokens. A fix round follows only for confirmed findings, re-reviewed by a fresh, cheap, diff-scoped agent.
 - **Token ceiling:** set by the owner before the build.
 
@@ -2159,7 +2159,7 @@ Expected: `81 passed`: 32 from the earlier suites, plus 3 + 7 + 33 + 6 new.
 
 - [ ] **Step 2: Lint the scripts**
 
-Run: `bash -n lab/lab.sh lab/fault.sh && mise exec shellcheck@0.11.0 -- shellcheck -S warning lab/lab.sh lab/fault.sh && echo lint-ok`
+Run: `bash -n lab/lab.sh && bash -n lab/fault.sh && mise exec shellcheck@0.11.0 -- shellcheck -S warning lab/lab.sh lab/fault.sh && echo lint-ok`
 
 Expected: `lint-ok`.
 
