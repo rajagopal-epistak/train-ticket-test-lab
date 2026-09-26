@@ -177,7 +177,7 @@ Names are deployment names: the 46 `ts-*` services, `tt-traffic-driver`, and `fl
 | S1 | Operator chart or DatadogAgent apply failed | `kubectl -n datadog get pods; kubectl -n datadog describe datadogagent datadog` |
 | G1 | Agent pods not ready; often the image pull or the node's Pod Security | `kubectl -n datadog get pods -o wide; kubectl -n datadog logs deploy/datadog-cluster-agent` |
 | S2 | `lab/fault.sh off` failed | run `lab/fault.sh status <F>` for the named fault |
-| S3 | Terraform apply of the lab failed; the error names the resource. `Helm release error … context deadline exceeded` means a StatefulSet release outlasted its 30 min timeout | `kubectl -n train-ticket get pods`, then re-run `up`: it is idempotent, and it reinstalls a timed-out release (its volumes are kept) |
+| S3 | Terraform apply of the lab failed; the error names the resource. `Helm release error … context deadline exceeded` means a StatefulSet release outlasted its 30 min timeout | `kubectl -n train-ticket get pods`, then re-run `up`: it is idempotent, and it upgrades a timed-out release in place (`helm upgrade --install`) |
 | G2 | a service can't start (often MySQL or Nacos still starting, or the quota) | `kubectl -n train-ticket get pods \| grep -v Running; kubectl -n train-ticket describe pod <pod>` |
 | G3 | MySQL not answering | `kubectl -n train-ticket exec tsdb-mysql-0 -- mysql -uroot -e 'SELECT 1'` |
 | G4 | a fault is still on, or flagd isn't serving | `lab/fault.sh status F22; kubectl -n train-ticket logs deploy/flagd` |

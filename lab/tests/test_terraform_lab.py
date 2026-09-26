@@ -138,3 +138,11 @@ def test_statefulset_releases_allow_for_one_replica_at_a_time():
     infra = (STAGE / "infra.tf").read_text()
     timeouts = dict(re.findall(r'resource "helm_release" "(\w+)" \{.*?timeout\s*=\s*(\d+)', infra, re.S))
     assert {name: int(timeouts[name]) for name in ("nacosdb", "tsdb", "nacos")} == {"nacosdb": 1800, "tsdb": 1800, "nacos": 1800}
+
+
+def test_helm_releases_upgrade_a_leftover_release_instead_of_refusing_it():
+    # Live run: a release whose install timed out is not in state, so the next `up` hit "cannot re-use a name that
+    # is still in use". upgrade_install makes it `helm upgrade --install`, which takes the leftover release over.
+    infra = (STAGE / "infra.tf").read_text()
+    blocks = re.findall(r'resource "helm_release" "(\w+)" \{(.*?)\n\}', infra, re.S)
+    assert {name for name, body in blocks if re.search(r"upgrade_install\s*=\s*true", body)} == {"nacosdb", "nacos", "rabbitmq", "tsdb"}
