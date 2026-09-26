@@ -229,6 +229,15 @@ def test_telemetry_names_must_be_known(lab):
     assert lab.run("p6_telemetry", rules).returncode == 0
 
 
+def test_tf_ready_selects_the_workspace_via_tf_workspace_not_a_shared_file(lab):
+    # `terraform workspace select` persists in .terraform/environment, shared by every run from this
+    # checkout. TF_WORKSPACE is per-process, so concurrent lab.sh runs for different LAB_NAMEs don't clash.
+    r = lab.run('require_inputs; KUBECONFIG=/dev/null; export_tf_vars; tf_ready lab; echo "TF_WORKSPACE=$TF_WORKSPACE"', {})
+    assert r.returncode == 0, r.stderr
+    assert "TF_WORKSPACE=tt-lab-1" in r.stdout
+    assert not any(c[0] == "terraform" and "workspace" in c for c in lab.calls())
+
+
 FLAGS_ON_22_AND_5 = """flags:
   tt-feat-05:
     state: ENABLED
@@ -472,14 +481,15 @@ def test_test_refuses_when_driver_logs_are_off(lab):
     assert "fault.sh" not in lab.log.read_text()
 
 
-def down_rules(lab, datadog_state="", train_ticket_owner="tt-lab-1", datadog_namespace_exit=1):
+def down_rules(lab, datadog_state="", train_ticket_owner="tt-lab-1", datadog_namespace_exit=1, train_ticket_persists=False):
     deploy_yaml = str(lab.path / "deployment/kubernetes-manifests/quickstart-k8s/yamls/deploy.yaml")
     if train_ticket_owner == "absent":
         owner_rules = [{"match": ["get", "namespace", "train-ticket"], "exit": 1}]
     else:
+        existence = {"exit": 0} if train_ticket_persists else {"seq": [{"exit": 0}, {"exit": 1}]}
         owner_rules = [
             {"match": ["get", "namespace", "train-ticket", "jsonpath"], "stdout": train_ticket_owner},
-            {"match": ["get", "namespace", "train-ticket"], "seq": [{"exit": 0}, {"exit": 1}]},
+            {"match": ["get", "namespace", "train-ticket"], **existence},
         ]
     return {
         "kubectl": [
@@ -527,6 +537,15 @@ def test_down_leaves_a_foreign_datadog_namespace_alone(lab):
     assert r.returncode == 0, r.stderr
     assert not any(c[0] == "kubectl" and c[1] == "delete" and "datadog" in " ".join(c) for c in lab.calls())
     assert "PASS D3: Agent not installed by this lab; left alone" in r.stdout
+    assert "DOWN PASS lab=tt-lab-1" in r.stdout
+
+
+def test_down_does_not_wait_for_a_foreign_train_ticket_namespace_to_disappear(lab):
+    # down never touches a foreign train-ticket, so it must not wait for it to vanish either, or D4 times
+    # out after 10 minutes for a namespace that was never going to go away.
+    rules = down_rules(lab, train_ticket_owner="other-lab", train_ticket_persists=True)
+    r = lab.run("trap cleanup EXIT; cmd_down", rules)
+    assert r.returncode == 0, r.stderr
     assert "DOWN PASS lab=tt-lab-1" in r.stdout
 
 

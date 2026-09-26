@@ -149,10 +149,10 @@ tf() {
   terraform -chdir="$TF_DIR/$stage" "$@"
 }
 
-tf_ready() {
-  tf "$1" init -input=false >/dev/null
-  tf "$1" workspace select -or-create "$LAB_NAME" >/dev/null
-}
+# TF_WORKSPACE (set in export_tf_vars) selects the workspace; it auto-creates one that doesn't exist yet,
+# and unlike `terraform workspace select`, it's per-process, so concurrent runs from one checkout don't
+# interfere by overwriting .terraform/environment.
+tf_ready() { tf "$1" init -input=false >/dev/null; }
 
 tf_has_state() { [ -n "$(tf "$1" state list 2>/dev/null)" ]; }
 
@@ -165,7 +165,7 @@ export_tf_vars() {
   export TF_VAR_kubeconfig="$KUBECONFIG" TF_VAR_lab_name="$LAB_NAME" TF_VAR_dd_site="$DD_SITE" \
     TF_VAR_apm_enabled="$APM_ENABLED" TF_VAR_apm_hosts_budget="$APM_HOSTS_BUDGET" \
     TF_VAR_apm_ingest_gb_budget="$APM_INGEST_GB_BUDGET" TF_VAR_telemetry_file="$REPO/lab/telemetry.yaml" \
-    TF_VAR_kubelet_tls_verify="$KUBELET_TLS_VERIFY"
+    TF_VAR_kubelet_tls_verify="$KUBELET_TLS_VERIFY" TF_WORKSPACE="$LAB_NAME"
 }
 
 p6_telemetry() {
@@ -545,11 +545,12 @@ monitors_left() {
 }
 
 cmd_down() {
-  local ours=""
+  local ours="" ns_before
   require_inputs
   pin_context
   export_tf_vars
-  if [ "$(ns_owner "$NS")" = "$LAB_NAME" ]; then native_reset; else pass D1 "namespace $NS not present; native reset skipped"; fi
+  ns_before=$(ns_owner "$NS")
+  if [ "$ns_before" = "$LAB_NAME" ]; then native_reset; else pass D1 "namespace $NS not present; native reset skipped"; fi
   STEP=D2
   tf_ready lab
   tf lab destroy -input=false -auto-approve || fail D2 "terraform destroy of stage lab failed"
@@ -574,7 +575,11 @@ cmd_down() {
     pass D3 "Agent not installed by this lab; left alone"
   fi
   STEP=D4
-  poll 600 15 ns_absent "$NS" || fail D4 "namespace $NS still present"
+  # A namespace that was never ours (foreign or already gone) is never touched above, so it's never
+  # going to disappear either; only wait for it when down was the one meant to remove it.
+  if [ "$ns_before" = "$LAB_NAME" ] || [ "$ns_before" = absent ]; then
+    poll 600 15 ns_absent "$NS" || fail D4 "namespace $NS still present"
+  fi
   if [ -n "$ours" ]; then
     [ "$(ns_owner "$DD_NS")" = absent ] || fail D4 "namespace $DD_NS still present"
     ! kubectl get mutatingwebhookconfiguration datadog-webhook >/dev/null 2>&1 || fail D4 "webhook datadog-webhook still present"
