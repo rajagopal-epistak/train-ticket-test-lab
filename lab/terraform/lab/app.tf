@@ -100,5 +100,6 @@ resource "kubernetes_manifest" "deployments" {
     helm_release.nacos,
     helm_release.rabbitmq,
     helm_release.tsdb,
+    terraform_data.mysql_root_ipv6,
   ]
 }

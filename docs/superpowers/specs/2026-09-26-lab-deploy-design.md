@@ -367,3 +367,9 @@ The plan's code was written and tested in a scratch clone before the plan. That 
    - the tests M8 asked for;
    - two review findings: the ERR trap now reports only from the top-level shell (R1), and G5 samples the newest pod (R2).
 9. **Deferred to the backlog by the owner:** L4–L8, L11 and L12.
+
+## Live-run amendments (first run on a k3s box, 2026-09-26)
+
+1. **MySQL and Nacos release timeouts are 1800 s:** a 3-replica MySQL took ~22 min, since its replicas start in order.
+2. **All four Helm releases set `upgrade_install`:** a timed-out install isn't kept in state, and a plain retry collides with the leftover release.
+3. **Stage `lab` adds a `root@'::1'` account on every MySQL pod after each MySQL release,** outside the binlog; Nacos and the Deployments wait for it. Where pods have an IPv6 loopback, xenon's `root@localhost` health check arrives from `::1`, is denied under `skip-name-resolve`, and no leader is elected. This matches upstream train-ticket #234, #233, #246 and #268, and it is RadonDB's own fix (radondb-mysql-kubernetes #441).

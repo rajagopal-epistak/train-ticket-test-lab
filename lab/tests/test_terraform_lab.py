@@ -146,3 +146,18 @@ def test_helm_releases_upgrade_a_leftover_release_instead_of_refusing_it():
     infra = (STAGE / "infra.tf").read_text()
     blocks = re.findall(r'resource "helm_release" "(\w+)" \{(.*?)\n\}', infra, re.S)
     assert {name for name, body in blocks if re.search(r"upgrade_install\s*=\s*true", body)} == {"nacosdb", "nacos", "rabbitmq", "tsdb"}
+
+
+def test_mysql_gets_a_root_account_for_ipv6_loopback_before_its_consumers():
+    # Live run: xenon health-checks root@localhost:3306, which arrives from ::1 where pods have an IPv6 loopback; the
+    # vendored chart only creates root@localhost and root@127.0.0.1, so no leader is elected (RadonDB's fix: #441).
+    text = (STAGE / "infra.tf").read_text() + (STAGE / "app.tf").read_text()
+    fix = re.search(r'resource "terraform_data" "mysql_root_ipv6" \{(.*?)\n\}', text, re.S)
+    assert fix, "terraform_data.mysql_root_ipv6 missing"
+    body = fix.group(1)
+    assert "helm_release.nacosdb" in body and "helm_release.tsdb" in body
+    assert "sql_log_bin=0" in body and "'root'@'::1'" in body and "WITH GRANT OPTION" in body
+    nacos = re.search(r'resource "helm_release" "nacos" \{(.*?)\n\}', text, re.S).group(1)
+    assert 'terraform_data.mysql_root_ipv6["nacosdb"]' in nacos
+    deployments = re.search(r'resource "kubernetes_manifest" "deployments" \{(.*?)\n\}', text, re.S).group(1)
+    assert "terraform_data.mysql_root_ipv6" in deployments

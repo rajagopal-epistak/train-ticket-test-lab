@@ -178,6 +178,7 @@ Names are deployment names: the 46 `ts-*` services, `tt-traffic-driver`, and `fl
 | G1 | Agent pods not ready; often the image pull or the node's Pod Security | `kubectl -n datadog get pods -o wide; kubectl -n datadog logs deploy/datadog-cluster-agent` |
 | S2 | `lab/fault.sh off` failed | run `lab/fault.sh status <F>` for the named fault |
 | S3 | Terraform apply of the lab failed; the error names the resource. `Helm release error … context deadline exceeded` means a StatefulSet release outlasted its 30 min timeout | `kubectl -n train-ticket get pods`, then re-run `up`: it is idempotent, and it upgrades a timed-out release in place (`helm upgrade --install`) |
+| S3 | Nacos `initmysql` crash-loops with `Can't connect to MySQL server on 'nacosdb-mysql-leader'`: no MySQL pod is `role=leader`. Stage `lab` adds a `root@'::1'` account on every MySQL pod right after each MySQL release (the vendored RadonDB chart lacks it, so xenon can't health-check MySQL over IPv6 loopback) | `kubectl -n train-ticket get pods -l 'release in (nacosdb,tsdb)' -L role`; if none is leader, re-run `up` |
 | G2 | a service can't start (often MySQL or Nacos still starting, or the quota) | `kubectl -n train-ticket get pods \| grep -v Running; kubectl -n train-ticket describe pod <pod>` |
 | G3 | MySQL not answering | `kubectl -n train-ticket exec tsdb-mysql-0 -- mysql -uroot -e 'SELECT 1'` |
 | G4 | a fault is still on, or flagd isn't serving | `lab/fault.sh status F22; kubectl -n train-ticket logs deploy/flagd` |
