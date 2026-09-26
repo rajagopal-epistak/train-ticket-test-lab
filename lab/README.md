@@ -70,13 +70,13 @@ Every input is an environment variable. Keys are never written to a file, a comm
 export KUBE_CONTEXT=lab-ctx LAB_NAME=tt-lab-1 DD_SITE=datadoghq.eu
 export DD_API_KEY=... DD_APP_KEY=...
 export APM_HOSTS_BUDGET=4 APM_INGEST_GB_BUDGET=150
-lab/lab.sh up      # 20-40 min on a fresh cluster; up to about 2 h in the worst case; safe to run again
+lab/lab.sh up      # 30-60 min on a fresh cluster; up to about 3 h in the worst case; safe to run again
 lab/lab.sh test    # 10-40 min: F22 on, wait for the alert, F22 off, wait for recovery; up to about 55 min in the worst case
 lab/lab.sh down    # removes everything this lab created
 ```
 
 **Worst-case budgets**, if a run allows each wait to reach its full timeout before succeeding:
-- `up`: about 2 h — G1 up to 45 min (the Cluster Agent and node Agent rollouts, then the webhook), G2 up to 20 min plus 10 min per StatefulSet, G5 up to 20 min, G7 up to 30 min across its three checks.
+- `up`: about 3 h — S3 up to 60 min (the two MySQL releases in parallel, then Nacos, each up to 30 min; a 3-replica MySQL took ~22 min on a 32-core k3s node), G1 up to 45 min (the Cluster Agent and node Agent rollouts, then the webhook), G2 up to 20 min plus 10 min per StatefulSet, G5 up to 20 min, G7 up to 30 min across its three checks.
 - `test`: about 55 min — T1 up to 20 min, T3 up to 15 min, T4 up to 15 min, plus the two `fault.sh` calls.
 
 Each step prints `PASS <id>` or `FAIL <id>: <reason>`, and the first FAIL stops the command with exit 1. A good `up` ends with `UP PASS lab=tt-lab-1 agent=installed apm=true`, `test` with `TEST PASS lab=tt-lab-1`, and `down` with `DOWN PASS lab=tt-lab-1`.
@@ -177,7 +177,7 @@ Names are deployment names: the 46 `ts-*` services, `tt-traffic-driver`, and `fl
 | S1 | Operator chart or DatadogAgent apply failed | `kubectl -n datadog get pods; kubectl -n datadog describe datadogagent datadog` |
 | G1 | Agent pods not ready; often the image pull or the node's Pod Security | `kubectl -n datadog get pods -o wide; kubectl -n datadog logs deploy/datadog-cluster-agent` |
 | S2 | `lab/fault.sh off` failed | run `lab/fault.sh status <F>` for the named fault |
-| S3 | Terraform apply of the lab failed; the error names the resource | re-run `up` (it is idempotent) |
+| S3 | Terraform apply of the lab failed; the error names the resource. `Helm release error … context deadline exceeded` means a StatefulSet release outlasted its 30 min timeout | `kubectl -n train-ticket get pods`, then re-run `up`: it is idempotent, and it reinstalls a timed-out release (its volumes are kept) |
 | G2 | a service can't start (often MySQL or Nacos still starting, or the quota) | `kubectl -n train-ticket get pods \| grep -v Running; kubectl -n train-ticket describe pod <pod>` |
 | G3 | MySQL not answering | `kubectl -n train-ticket exec tsdb-mysql-0 -- mysql -uroot -e 'SELECT 1'` |
 | G4 | a fault is still on, or flagd isn't serving | `lab/fault.sh status F22; kubectl -n train-ticket logs deploy/flagd` |

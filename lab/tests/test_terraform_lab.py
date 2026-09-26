@@ -131,3 +131,10 @@ def test_k8s_and_log_scopes_key_off_the_lab_tag_not_cluster_or_namespace():
     assert "kube_cluster_name" not in monitors["oom_killed"]["expr"]
     assert "kube_namespace:train-ticket" not in monitors["oom_killed"]["expr"]
     assert "lab:tt-lab-1 service:tt-traffic-driver" in monitors["edge_5xx"]["expr"]
+
+
+def test_statefulset_releases_allow_for_one_replica_at_a_time():
+    # Measured on the first live run: a 3-replica MySQL release took ~22 min (replicas start in order), past 900 s.
+    infra = (STAGE / "infra.tf").read_text()
+    timeouts = dict(re.findall(r'resource "helm_release" "(\w+)" \{.*?timeout\s*=\s*(\d+)', infra, re.S))
+    assert {name: int(timeouts[name]) for name in ("nacosdb", "tsdb", "nacos")} == {"nacosdb": 1800, "tsdb": 1800, "nacos": 1800}
