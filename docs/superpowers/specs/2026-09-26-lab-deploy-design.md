@@ -1,0 +1,286 @@
+# Lab deploy: Terraform setup, Datadog monitoring and a fault test
+
+**Date:** 2026-09-26. **Branch:** `lab/deploy`, from `master` at `a4c1abce` (easy-faults merged).
+
+## Goal
+
+The owner hands this deliverable to an agent, and the agent runs it. It needs no reasoning, and it gives the same result every time.
+- `lab/lab.sh up` stands the lab up on any x86_64 Kubernetes cluster:
+  - the Datadog Agent, unless one is already present;
+  - Train-Ticket with the eight lab faults, flagd and the traffic driver;
+  - fault-agnostic Datadog monitors.
+- `lab/lab.sh test` injects F22 and proves a monitor catches it.
+- `lab/lab.sh down` removes everything the lab created.
+
+The script owns the idempotency, the live-state checks and the teardown. The agent only runs it and reports.
+
+## Decisions (owner, 2026-09-26)
+
+| # | Decision |
+|---|---|
+| D1 | The deliverable is a script the agent runs. It replaces the agent-read runbook `lab/DEPLOYER.md`, which this branch deletes. |
+| D2 | Everything runs as Kubernetes workloads in namespaces. Nothing is installed on a node's OS. |
+| D3 | Install the Datadog Agent through the Datadog Operator (Datadog's recommended method). Skip the install when an Agent is already present: one in the cluster that this lab did not create, or one installed on a node's OS. |
+| D4 | Terraform for everything with lasting state; a thin `lab/lab.sh` wrapper for checks, the Agent decision and sequencing; the existing `lab/fault.sh` for faults. |
+| D5 | APM on, via Single Step Instrumentation (SSI), scoped to namespace `train-ticket`. One input, `APM_ENABLED`, turns off both SSI and the APM monitors. |
+| D6 | Monitors are fault-agnostic (golden signals, pod health, business and data checks, budget guards). There are no per-fault oracle monitors. |
+| D7 | No notification handle on any monitor. Tests read monitor state through the API. |
+| D8 | The test fault is F22. |
+| D9 | The work lives on the `lab/deploy` branch, in the worktree `~/Documents/barath/work/train-ticket-test-lab-deploy`. |
+
+## For review: two points this spec adds
+
+1. **Which signal the F22 test passes on.** Datadog's Python tracer lists Tornado as *"Automatic: no"*: the patch must run before Tornado is imported. It is unproven that SSI's injection meets that for `ts-voucher-service`.
+   - This spec sets `DD_TRACE_TORNADO_ENABLED=true` through SSI's `ddTraceConfigs`. That is inferred from ddtrace's convention for integrations that are off by default, and not quoted from the docs.
+   - The test **passes on the driver's edge-5xx monitor** (a deterministic log signal).
+   - It **reports** whether the APM error-rate monitor on the voucher also fired.
+   - This changes D8's detection signal, from the APM error-rate monitor alone to the edge monitor.
+2. **Log collection scope.** Logs are collected from every container in `train-ticket`, which is 46 services plus the driver. That is most useful for RCA, and it costs log ingestion and indexing. The alternative is the driver's logs only, which is all the monitors need. This spec takes the whole namespace and adds no log budget monitor. Say if you want either one changed.
+
+## Layout
+
+```
+lab/
+  lab.sh                 # up | test | down
+  fault.sh               # unchanged
+  terraform/
+    datadog/             # stage 1 (only when installing the Agent): Operator chart + DatadogAgent via a local chart
+      agent-chart/       #   one template: the DatadogAgent resource, filled from Terraform values
+    lab/                 # stage 2: namespace, 4 infra charts, 117 app objects, flagd, driver, monitors
+  tests/                 # offline tests (see Testing)
+lab/README.md            # "Run the lab" section replaces the DEPLOYER pointer
+```
+
+Why the DatadogAgent is a local chart and not `kubernetes_manifest`: the manifest resource *"requires API access during planning time … and thus cannot be created in the same apply operation"* as its CRD. A `helm_release` checks the CRD only when it applies. So an Operator release followed by an agent release (with `depends_on`) works in one apply.
+
+## Inputs
+
+All inputs come from environment variables, so keys never appear in argv, files or Terraform state.
+
+| Variable | Required | Example | Use |
+|---|---|---|---|
+| `KUBE_CONTEXT` | yes | `lab-ctx` | the only context used; every `kubectl` and provider call passes it explicitly |
+| `LAB_NAME` | yes | `tt-lab-1` | the Datadog cluster name, the `env` tag, the `lab:` tag, the monitor-name prefix and the Terraform workspace name |
+| `DD_SITE` | yes | `datadoghq.eu` | Agent `global.site`; provider `api_url = https://api.<DD_SITE>/` |
+| `DD_API_KEY`, `DD_APP_KEY` | yes | none | read by the Datadog provider from the environment; put in the Agent Secret by the wrapper |
+| `APM_HOSTS_BUDGET` | yes | `4` | threshold of the APM-host budget monitor |
+| `APM_INGEST_GB_BUDGET` | yes | `150` | monthly ingested-span GB budget; the monitor alerts on a daily share (budget ÷ 30) |
+| `APM_ENABLED` | no, default `true` | `false` | turns off SSI and the APM monitors |
+
+**Tools on the runner:**
+- `terraform` 1.8 or later (1.16.x recommended), for provider-defined functions;
+- `kubectl`, `curl`, `python3`;
+- no Helm CLI.
+
+**Pinned providers:**
+- `hashicorp/helm ~> 3.3`, using v3 syntax (`kubernetes = { config_path, config_context }`, `set = [{name, value}]`);
+- `hashicorp/kubernetes ~> 3.2`;
+- `DataDog/datadog ~> 4.22`.
+
+**Other pins:** Operator chart `2.27.0`; Agent and Cluster Agent `7.83.3`.
+
+**State:** local, one workspace per `LAB_NAME` (`terraform workspace select -or-create`), git-ignored. Losing the state means a manual teardown.
+
+**Context pinning:**
+- The wrapper writes a minified kubeconfig for `KUBE_CONTEXT` to a temp file (`kubectl config view --minify --flatten --context=…`, mode 600, deleted by an exit trap) and exports `KUBECONFIG` to it.
+- That makes every `kubectl` call, including the unchanged `fault.sh`, and both providers' `config_path` target that one context. The user's own current-context is left alone.
+
+## `up`
+
+Each numbered step prints `PASS <id>` or `FAIL <id>: <reason>`. The first FAIL stops the run with exit 1. Running `up` again is safe.
+
+### Preflight
+
+- **P1:** the tools are present, and `terraform version` ≥ 1.8.
+- **P2:** the context exists. Every node is Ready and `amd64`. The cluster has a default StorageClass.
+- **P3:** `GET /api/v1/validate` with `DD-API-KEY` returns `{"valid": true}`. The app key is checked with `GET /api/v1/monitor?page_size=1`; Datadog has no app-key validation endpoint, so a 200 counts as valid.
+- **P4:** namespace `train-ticket` is absent, or it carries the label `lab=<LAB_NAME>`. Never adopt a stranger's namespace.
+
+### Agent decision (P5)
+
+`install_agent=true` if the stage-1 state for this workspace is non-empty, because an Agent this lab installed is always kept. Otherwise it is true only if none of the following finds an Agent:
+1. **A foreign DaemonSet in the cluster:** any DaemonSet in any namespace labelled `agent.datadoghq.com/component=agent`, or running an image from an official Agent repository: `registry.datadoghq.com`, `gcr.io/datadoghq`, `eu.gcr.io/datadoghq`, `asia.gcr.io/datadoghq`, `public.ecr.aws/datadog`, `datadoghq.azurecr.io`, or `docker.io/datadog` (repository `agent`).
+2. **A host install:**
+   - For each node, a short-lived pod (`docker.io/library/busybox`, pinned `nodeName`, `hostPath /etc/datadog-agent` read-only) runs `test -f /host/etc/datadog-agent/datadog.yaml`. That is the documented config path of the Linux package.
+   - The probe pods run in a temporary namespace `tt-lab-probe` labelled `pod-security.kubernetes.io/enforce=privileged`. It is deleted afterwards.
+
+When the install is skipped, the wrapper prints which features it could not verify: APM injection for `train-ticket`, log collection and Kubernetes state metrics. The APM monitors may then sit at No Data.
+
+### Stage 1: `lab/terraform/datadog` (only when `install_agent`)
+
+The wrapper first creates namespace `datadog` with the labels `lab=<LAB_NAME>` and `pod-security.kubernetes.io/enforce=privileged`. It then applies Secret `datadog-secret` with keys `api-key` and `app-key`: `kubectl create secret … --from-env-file=<(…) --dry-run=client -o yaml | kubectl apply -f -`, with the keys never in argv.
+
+Terraform:
+- `helm_release.operator`: chart `datadog-operator` `2.27.0` from `https://helm.datadoghq.com`, namespace `datadog`. It installs the CRDs by default (`installCRDs: true`).
+- `helm_release.agent`: the local `agent-chart`, `depends_on` the Operator. It renders:
+
+```yaml
+apiVersion: datadoghq.com/v2alpha1
+kind: DatadogAgent
+metadata: {name: datadog, namespace: datadog}
+spec:
+  global:
+    clusterName: <LAB_NAME>
+    site: <DD_SITE>
+    tags: ["env:<LAB_NAME>", "lab:<LAB_NAME>"]
+    credentials:
+      apiSecret: {secretName: datadog-secret, keyName: api-key}
+      appSecret: {secretName: datadog-secret, keyName: app-key}
+  features:
+    apm:
+      enabled: <APM_ENABLED>
+      instrumentation:
+        enabled: <APM_ENABLED>
+        targets:
+          - name: train-ticket
+            namespaceSelector: {matchNames: [train-ticket]}
+            ddTraceVersions: {java: "1", python: "4"}
+            ddTraceConfigs:
+              - name: DD_SERVICE
+                valueFrom: {fieldRef: {fieldPath: "metadata.labels['app']"}}   # every pod has app=<deployment>
+              - {name: DD_ENV, value: <LAB_NAME>}
+              - {name: DD_TRACE_TORNADO_ENABLED, value: "true"}                 # inferred; see For review 1
+    logCollection: {enabled: true, containerCollectAll: true}
+    kubeStateMetricsCore: {enabled: true}
+  override:
+    nodeAgent:
+      image: {tag: "7.83.3"}
+      env:
+        - {name: DD_CONTAINER_EXCLUDE_LOGS, value: "kube_namespace:.*"}
+        - {name: DD_CONTAINER_INCLUDE_LOGS, value: "kube_namespace:train-ticket"}
+    clusterAgent:
+      image: {tag: "7.83.3"}
+```
+
+**Gate G1:**
+- The Cluster Agent Deployment is Available.
+- The Agent DaemonSet is ready on every schedulable node.
+- MutatingWebhookConfiguration `datadog-webhook` exists. Pods created before it exists are not instrumented, which is why stage 2 waits for this gate.
+
+### Stage 2: `lab/terraform/lab`
+
+- `kubernetes_namespace_v1.train_ticket`, labelled `lab=<LAB_NAME>`. Every other resource depends on it, so `destroy` deletes it last, and that removes the MySQL PVCs too.
+- Four `helm_release` resources from the repo's local charts, using the same values `make deploy` uses (`hack/deploy/utils.sh`):
+  - `nacosdb` (mysql chart: user `nacos`, database `nacos`);
+  - `nacos` (db host `nacosdb-mysql-leader`), depending on `nacosdb`;
+  - `rabbitmq`;
+  - `tsdb` (mysql chart: user `ts`, database `ts`).
+
+  They use `wait = true` and `timeout = 900`.
+- `kubernetes_manifest` for every document in:
+  - `yamls/secret.yaml` (27 Secrets, tracked, host `tsdb-mysql-leader`);
+  - `yamls/svc.yaml` (44 Services);
+  - `yamls/deploy.yaml.sample` (46 Deployments; `make deploy`'s `sed` is a no-op, so the sample is the deployed file).
+
+  Each set is decoded with `provider::kubernetes::manifest_decode_multi`, keyed `"<kind>/<name>"`, and given `metadata.namespace = "train-ticket"`. The resources have no `wait` block; the wrapper's gates wait instead.
+- flagd:
+  - ConfigMap `flagd-config` from `templates/flagd-config.yaml`;
+  - Deployment and Service from `deployment/lab/flagd.yaml`.
+- The driver, from `deployment/lab/traffic-driver.yaml`.
+- The monitors (next section). APM monitors have `count = APM_ENABLED ? 1 : 0`.
+
+### Gates after stage 2
+
+- **G2:** `kubectl rollout status` for every Deployment and StatefulSet in `train-ticket`, with a 20 min budget. A FAIL names the stuck object and shows its last events.
+- **G3:** on each `tsdb-mysql-N`, `SELECT @@max_connections` returns at least 500. If lower, run `SET GLOBAL max_connections = 500` and read it again. The value does not survive a MySQL restart, which is why every `up` repeats this. The chart's `65535` has been seen not to apply.
+- **G4:** `lab/fault.sh status` for each of the eight faults reports off.
+- **G5** (APM on and Agent installed by us): pod `ts-basic-service` has the SSI injection init container. If it doesn't, run `kubectl rollout restart deploy -n train-ticket` once and check again.
+- **G6:** the driver has logged at least 10 `"evt": "outcome"` lines in the last 2 minutes.
+- **G7 (Datadog side;** polls up to 10 min; each check skipped when not applicable):
+  1. when the Agent is ours, hosts with `kube_cluster_name:<LAB_NAME>` report, via `GET /api/v1/hosts?filter=`;
+  2. a logs search for `service:tt-traffic-driver` over 5 minutes is non-empty;
+  3. with APM on, `sum:trace.servlet.request.hits{env:<LAB_NAME>}` is above 0 over 10 minutes.
+
+## Monitors
+
+In the queries, `<L>` stands for `LAB_NAME`, and `<k8s scope>` and `<log scope>` are the scopes listed below.
+
+- **Names:** `[<LAB_NAME>] …`.
+- **Tags:** `lab:<LAB_NAME>`, `managed-by:terraform`.
+- **Scope:** `env:<LAB_NAME>` for APM; `kube_cluster_name:<LAB_NAME>,kube_namespace:train-ticket` for Kubernetes; `kube_namespace:train-ticket service:tt-traffic-driver` for logs.
+- **Settings:** `require_full_window = false` (the traffic is sparse), `notify_no_data = false`, no `@` handle.
+- **Types:** metric monitors use `type = "query alert"`, the type the API spec maps the metric category to. Log monitors use `"log alert"`.
+
+| Monitor | Query (thresholds are initial and get tuned after the first baseline) | Expected to catch |
+|---|---|---|
+| Java p95 latency by service (APM) | `percentile(last_10m):p95:trace.servlet.request{env:<L>} by {service} > 2` | F7, and F1's cancel path if its latency shows |
+| Voucher p95 latency (APM) | `percentile(last_10m):p95:trace.tornado.request{env:<L>} by {service} > 2` | F17 |
+| Java error rate by service (APM) | `sum(last_10m):sum:trace.servlet.request.errors{env:<L>} by {service}.as_count() / sum:trace.servlet.request.hits{env:<L>} by {service}.as_count() > 0.1` | F7 |
+| Voucher error rate (APM) | the same over `trace.tornado.request.*` | F22 (reported, not the pass signal) |
+| OOMKilled by deployment | `max(last_10m):max:kubernetes.containers.state.terminated{<k8s scope>,reason:oomkilled} by {kube_deployment} >= 1` | F3 |
+| Restarts by deployment | `change(max(last_10m),last_10m):sum:kubernetes.containers.restarts{<k8s scope>} by {kube_deployment} > 2` | F3 |
+| Edge 5xx by path (driver) | `logs("<log scope> @evt:outcome (@http_status:500 OR @http_status:502 OR @http_status:503 OR @http_status:504)").index("*").rollup("count").by("@path").last("10m") > 2` | F7, F22 (the test's pass signal) |
+| Edge 4xx by path (driver) | the same with `@http_status:400 OR 401 OR 403 OR 404 OR 413`, `> 5` | F15 |
+| Business rejections by path (driver) | `logs("<log scope> @evt:outcome @tt_status:0").index("*").rollup("count").by("@path").last("10m") > 20` | F12 |
+| Fare anomaly (driver) | `logs("<log scope> @evt:fare_anomaly").index("*").rollup("count").last("10m") > 0` | F14 |
+| APM hosts budget | `max(last_1h):max:datadog.estimated_usage.apm_hosts{*} > <APM_HOSTS_BUDGET>` | billing |
+| APM ingestion budget | `sum(last_1d):sum:datadog.estimated_usage.apm.ingested_bytes{*}.as_count() > <APM_INGEST_GB_BUDGET × 1e9 / 30>` | billing |
+
+**Inferred, measured on the first run:**
+- the `percentile(...)` monitor form for distribution trace metrics;
+- exact-match numeric log queries without facets (the docs require a facet only for `<`/`>` comparisons);
+- whether the driver's log `service` is `tt-traffic-driver`;
+- the daily-sum form of the ingested-bytes budget query.
+
+Datadog validates each query when Terraform creates the monitor, so a malformed query fails `up` at stage 2.
+
+**Expected blind spot:** F1. Its refund lands 8 s after a successful cancel, and no generic signal sees that. The test report lists F1 as uncovered.
+
+## `test` (F22)
+
+1. **Baseline:**
+   - `up` must have passed.
+   - Wait up to 20 min until the edge-5xx group `@path:/getVoucher` is not in Alert.
+   - Record every monitor's `overall_state`.
+2. **Inject:** `lab/fault.sh on F22`. It must report the flag as served on.
+3. **Detect:** poll `GET /api/v1/monitor/{id}?group_states=all` every 30 s for up to 15 min.
+   - **PASS** when the edge-5xx group for `/getVoucher` reaches `Alert`.
+   - Record whether the voucher error-rate monitor fired, and when.
+4. **Clear:** `lab/fault.sh off F22`. Poll until the group is `OK`, for up to 15 min.
+5. **Report:** injection time, alert time, clear time, recovery time, and every monitor whose state changed during the window (possible false positives). If the APM error-rate monitor did not fire, say so, with "APM unsupported" when the Agent install was skipped.
+
+`fault.sh off F22` runs even when detection fails, so a failed test never leaves the fault on.
+
+## `down`
+
+1. `terraform destroy` the `lab` stage. This removes the monitors, releases, manifests and namespace `train-ticket`, and the PVCs with it.
+2. If the `datadog` stage state is non-empty:
+   - `terraform destroy` it;
+   - delete namespace `datadog`, only if it is labelled `lab=<LAB_NAME>`.
+3. **Checks:**
+   - both namespaces are gone;
+   - no monitor tagged `lab:<LAB_NAME>` remains (`GET /api/v1/monitor?monitor_tags=lab:<LAB_NAME>`);
+   - when stage 1 was ours, `datadog-webhook` is gone.
+
+A foreign Agent is never touched.
+
+## Testing the deliverable
+
+**Offline, in the build:**
+- `terraform fmt -check`, and `terraform init -backend=false && terraform validate`, for both stages.
+- `lab/tests/test_lab_sh.py`: the wrapper's decision and gate logic, run against stub `kubectl`/`terraform`/`curl` on `PATH`, in the same style as `test_fault_sh.py`. Covered:
+  - the Agent decision (own state, foreign DaemonSet by label, foreign by image, host probe hit, none);
+  - the P4 namespace guard;
+  - the G3 `max_connections` fix;
+  - the `test` flow, including the clear after a failure.
+- `test_docs.py` is updated for the deleted `DEPLOYER.md`.
+
+**Not possible offline:** a live run. The images are amd64-only, and there is no cluster here. The owner's first agent run is the end-to-end test. Its report settles the inferred items above, and the thresholds are tuned from its baseline.
+
+## Known limitations
+
+1. The first live run is the first end-to-end run.
+2. Tornado tracing under SSI is unproven, so the F22 pass signal is the driver's log monitor.
+3. No generic monitor catches F1.
+4. With a pre-existing Agent, APM, log and state-metric coverage is unverified, and the APM monitors may show No Data.
+5. APM hosts are billed on the monthly high-water mark (lower 99% of hourly counts). More than about 7 h on N nodes bills N hosts for that month, even if APM is turned off afterwards.
+6. Terraform state is local per workspace. If it is lost, the teardown is manual.
+7. The runner needs cluster-admin: the Operator installs CRDs and cluster roles, and the host probe uses `hostPath`.
+
+## Out of scope
+
+- Notifications.
+- Log facets and pipelines.
+- Dashboards.
+- The other seven faults' tests (`fault.sh` still toggles them).
+- Remote Terraform state.
