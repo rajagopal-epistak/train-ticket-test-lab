@@ -352,3 +352,7 @@ The plan's code was written and tested in a scratch clone before the plan. That 
 - Dashboards.
 - The other seven faults' tests (`fault.sh` still toggles them).
 - Remote Terraform state.
+
+## Review amendments (fix round, 2026-09-26)
+
+1. **H1:** `down`'s D3 also deletes `mutatingwebhookconfiguration datadog-webhook --ignore-not-found`, since neither Terraform nor the Helm chart removes it. The lost-state teardown gets the same step.

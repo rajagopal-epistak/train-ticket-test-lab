@@ -280,7 +280,7 @@ def down_rules(lab, datadog_state=""):
             {"match": ["get", "namespace", "train-ticket", "jsonpath"], "stdout": "tt-lab-1"},
             {"match": ["get", "namespace", "train-ticket"], "seq": [{"exit": 0}, {"exit": 1}]},
             {"match": ["get", "namespace", "datadog"], "exit": 1},
-            {"match": ["mutatingwebhookconfiguration"], "exit": 1},
+            {"match": ["get", "mutatingwebhookconfiguration"], "exit": 1},
         ],
         "make": [{"match": ["reset-deploy", "Namespace=train-ticket"], "exists": deploy_yaml}],
         "terraform": [{"match": ["state", "list"], "stdout": datadog_state}],
@@ -314,6 +314,11 @@ def test_down_destroys_the_agent_stage_only_when_it_is_ours(lab):
     assert r.returncode == 0, r.stderr
     destroys = [c for c in lab.calls() if c[0] == "terraform" and "destroy" in c]
     assert [c[1] for c in destroys] == [f"-chdir={lab.path}/lab/terraform/lab", f"-chdir={lab.path}/lab/terraform/datadog"]
+    deletes = [c for c in lab.calls() if c[:2] == ["kubectl", "delete"] and "mutatingwebhookconfiguration" in c]
+    assert any("datadog-webhook" in c and "--ignore-not-found" in c for c in deletes), lab.calls()
+    delete_index = lab.calls().index(deletes[0])
+    destroy_index = lab.calls().index(destroys[-1])
+    assert delete_index > destroy_index
 
 
 def test_agent_secret_keys_never_reach_argv(lab):

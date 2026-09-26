@@ -513,6 +513,9 @@ cmd_down() {
   if tf_has_state datadog; then
     ours=1
     tf datadog destroy -input=false -auto-approve || fail D3 "terraform destroy of stage datadog failed"
+    # The Cluster Agent creates this webhook with no labels and no ownerReferences, and only deletes it when
+    # mutation is disabled, never on shutdown. Neither the Operator's cleanup nor the Helm chart removes it either.
+    kubectl delete mutatingwebhookconfiguration datadog-webhook --ignore-not-found >/dev/null
     if [ "$(ns_owner "$DD_NS")" = "$LAB_NAME" ]; then kubectl delete namespace "$DD_NS" --timeout=600s >/dev/null; fi
     pass D3 "stage datadog destroyed"
   else

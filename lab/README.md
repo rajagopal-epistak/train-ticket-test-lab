@@ -186,7 +186,7 @@ Names are deployment names: the 46 `ts-*` services, `tt-traffic-driver`, and `fl
 **If the Terraform state is lost** (`lab/terraform/*/terraform.tfstate.d/<LAB_NAME>`), tear down by hand:
 1. `make reset-deploy Namespace=train-ticket`;
 2. `kubectl delete namespace train-ticket`;
-3. if this lab installed the Agent: `kubectl delete datadogagent -n datadog datadog`, `helm -n datadog uninstall datadog-operator`, `kubectl delete namespace datadog`;
+3. if this lab installed the Agent: `kubectl delete datadogagent -n datadog datadog`, `helm -n datadog uninstall datadog-operator`, `kubectl delete mutatingwebhookconfiguration datadog-webhook --ignore-not-found`, `kubectl delete namespace datadog`;
 4. delete the monitors tagged `lab:<LAB_NAME>` in Datadog.
 
 ## Build and test
