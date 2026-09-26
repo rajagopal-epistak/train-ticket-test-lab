@@ -85,6 +85,11 @@ resource "kubernetes_manifest" "deployments" {
   field_manager {
     force_conflicts = true
   }
+  # computed_fields replaces, not extends, the provider's default (metadata.annotations, metadata.labels).
+  # spec.template.metadata.annotations must stay tolerated too: kubectl rollout restart adds
+  # kubectl.kubernetes.io/restartedAt there, and G5's fallback, every fault.sh flag toggle and a
+  # cost-saving restart all do that, which would otherwise break the next apply.
+  computed_fields = ["metadata.annotations", "metadata.labels", "spec.template.metadata.annotations"]
   depends_on = [
     terraform_data.telemetry_check,
     kubernetes_manifest.others,

@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -86,6 +87,17 @@ def test_others_have_no_stringdata_and_secrets_carry_base64_data():
     assert secret["data"]["ASSURANCE_MYSQL_HOST"] == base64.b64encode(b"tsdb-mysql-leader").decode()
     configmap = evaluate('local.others["ConfigMap/flagd-config"]')
     assert "data" in configmap and "stringData" not in configmap
+
+
+def test_deployments_manifest_tolerates_a_restart_annotation():
+    # computed_fields replaces, not extends, the provider's default (metadata.annotations, metadata.labels),
+    # so spec.template.metadata.annotations must be listed alongside them, or a rollout-restart breaks re-apply.
+    block = re.search(r'resource "kubernetes_manifest" "deployments" \{(.*?)\n\}', (STAGE / "app.tf").read_text(), re.S)
+    assert block, "kubernetes_manifest.deployments block not found"
+    computed = re.search(r"computed_fields\s*=\s*\[(.*?)\]", block.group(1), re.S)
+    assert computed, "computed_fields not set on kubernetes_manifest.deployments"
+    fields = {f.strip().strip('"') for f in computed.group(1).split(",") if f.strip()}
+    assert fields == {"metadata.annotations", "metadata.labels", "spec.template.metadata.annotations"}
 
 
 def test_oom_killed_monitor_watches_last_state():
