@@ -141,7 +141,7 @@ spec:
               - name: DD_SERVICE
                 valueFrom: {fieldRef: {fieldPath: "metadata.labels['app']"}}   # every pod has app=<deployment>
               - {name: DD_ENV, value: <LAB_NAME>}
-              - {name: DD_TRACE_TORNADO_ENABLED, value: "true"}                 # inferred; see For review 1
+              - {name: DD_TRACE_TORNADO_ENABLED, value: "true"}                 # inferred; see D10
     logCollection: {enabled: true, containerCollectAll: true}
     kubeStateMetricsCore: {enabled: true}
   override:
