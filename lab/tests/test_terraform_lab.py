@@ -1,0 +1,84 @@
+import json
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+STAGE = REPO / "lab" / "terraform" / "lab"
+VARS = {
+    "TF_VAR_kubeconfig": "/nonexistent", "TF_VAR_lab_name": "tt-lab-1", "TF_VAR_dd_site": "datadoghq.eu",
+    "TF_VAR_apm_enabled": "true", "TF_VAR_apm_hosts_budget": "4", "TF_VAR_apm_ingest_gb_budget": "150",
+    "TF_VAR_telemetry_file": str(REPO / "lab" / "telemetry.yaml"),
+}
+
+
+def terraform(*args, env=None, stdin=""):
+    return subprocess.run(["terraform", f"-chdir={STAGE}", *args], input=stdin, capture_output=True, text=True,
+                          env={**os.environ, **VARS, **(env or {})})
+
+
+@pytest.fixture(scope="module", autouse=True)
+def init():
+    r = terraform("init", "-backend=false", "-input=false")
+    assert r.returncode == 0, r.stderr
+
+
+def evaluate(expr, **env):
+    r = terraform("console", env=env, stdin=f"jsonencode({expr})\n")
+    assert r.returncode == 0, r.stderr
+    return json.loads(json.loads(r.stdout))
+
+
+def test_formatted_and_valid():
+    assert terraform("fmt", "-check", "-recursive").returncode == 0
+    r = terraform("validate")
+    assert r.returncode == 0, r.stderr
+
+
+def test_every_object_make_deploy_applies_plus_flagd_and_driver():
+    assert evaluate("length(local.deployments)") == 46 + 2
+    assert evaluate("length(local.others)") == 27 + 44 + 2  # secrets, services, flagd Service and ConfigMap
+    assert evaluate('local.deployments["ts-voucher-service"].metadata.namespace') == "train-ticket"
+    assert evaluate('local.others["ConfigMap/flagd-config"].metadata.namespace') == "train-ticket"
+
+
+def test_committed_telemetry_switches_nothing_off():
+    assert evaluate("local.unknown_services") == []
+    for name in ("ts-news-service", "tt-traffic-driver", "flagd"):
+        meta = evaluate(f'local.deployments["{name}"].spec.template.metadata')
+        assert "annotations" not in meta and "admission.datadoghq.com/enabled" not in meta["labels"]
+
+
+def test_switches_land_on_exactly_the_listed_deployments(tmp_path):
+    f = tmp_path / "telemetry.yaml"
+    f.write_text("logs_off: [ts-news-service]\napm_off:\n  - tt-traffic-driver\n")
+    env = {"TF_VAR_telemetry_file": str(f)}
+    assert evaluate('local.deployments["ts-news-service"].spec.template.metadata.annotations', **env) == {
+        "ad.datadoghq.com/logs_exclude": "true"}
+    assert evaluate('local.deployments["tt-traffic-driver"].spec.template.metadata.labels', **env) == {
+        "app": "tt-traffic-driver", "admission.datadoghq.com/enabled": "false"}
+    assert evaluate('local.deployments["ts-basic-service"].spec.template.metadata', **env) == {
+        "labels": {"app": "ts-basic-service"}}
+
+
+def test_unknown_names_are_reported(tmp_path):
+    f = tmp_path / "telemetry.yaml"
+    f.write_text("logs_off: [ts-bogus]\napm_off: []\n")
+    assert evaluate("local.unknown_services", TF_VAR_telemetry_file=str(f)) == ["ts-bogus"]
+
+
+def test_apm_switch_drops_only_the_apm_monitors():
+    on = set(evaluate("keys(local.monitors)"))
+    off = set(evaluate("keys(local.monitors)", TF_VAR_apm_enabled="false"))
+    assert on - off == {"java_latency", "voucher_latency", "java_errors", "voucher_errors"}
+    assert off == {"edge_5xx", "edge_4xx", "business_rejections", "fare_anomaly", "oom_killed", "restarts",
+                   "apm_hosts_budget", "apm_ingest_budget"}
+
+
+def test_log_monitors_scope_the_driver_and_budget_is_a_daily_share():
+    monitors = evaluate("local.monitors")
+    assert "service:tt-traffic-driver" in monitors["edge_5xx"]["expr"]
+    assert '.by("@path")' in monitors["edge_5xx"]["expr"]
+    assert monitors["apm_ingest_budget"]["critical"] == 5_000_000_000

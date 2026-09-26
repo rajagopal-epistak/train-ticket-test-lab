@@ -1,0 +1,91 @@
+# The Train-Ticket objects `make deploy` applies, plus flagd and the traffic driver, decoded from the committed YAML.
+# deploy.yaml.sample is the deployed file as-is: make deploy's sed (nacos -> nacos, rabbitmq -> rabbitmq) is a no-op.
+
+locals {
+  yamls = "${local.repo}/deployment/kubernetes-manifests/quickstart-k8s/yamls"
+
+  telemetry = yamldecode(file(var.telemetry_file))
+  logs_off  = toset(coalesce(try(local.telemetry.logs_off, null), []))
+  apm_off   = toset(coalesce(try(local.telemetry.apm_off, null), []))
+
+  flagd_docs = provider::kubernetes::manifest_decode_multi(file("${local.repo}/deployment/lab/flagd.yaml"))
+
+  deployment_docs = concat(
+    provider::kubernetes::manifest_decode_multi(file("${local.yamls}/deploy.yaml.sample")),
+    [for d in local.flagd_docs : d if d.kind == "Deployment"],
+    provider::kubernetes::manifest_decode_multi(file("${local.repo}/deployment/lab/traffic-driver.yaml")),
+  )
+
+  other_docs = concat(
+    provider::kubernetes::manifest_decode_multi(file("${local.yamls}/secret.yaml")),
+    provider::kubernetes::manifest_decode_multi(file("${local.yamls}/svc.yaml")),
+    [for d in local.flagd_docs : d if d.kind != "Deployment"],
+    [yamldecode(file("${local.repo}/templates/flagd-config.yaml"))],
+  )
+
+  # logs_off adds the pod annotation ad.datadoghq.com/logs_exclude; apm_off adds the pod label admission.datadoghq.com/enabled=false.
+  deployments = {
+    for d in local.deployment_docs : d.metadata.name => merge(d, {
+      metadata = merge(d.metadata, { namespace = "train-ticket" })
+      spec = merge(d.spec, {
+        template = merge(d.spec.template, {
+          metadata = merge(
+            d.spec.template.metadata,
+            {
+              labels = merge(
+                d.spec.template.metadata.labels,
+                { for k, v in { "admission.datadoghq.com/enabled" = "false" } : k => v if contains(local.apm_off, d.metadata.name) },
+              )
+            },
+            {
+              for k, v in {
+                annotations = merge(try(d.spec.template.metadata.annotations, {}), { "ad.datadoghq.com/logs_exclude" = "true" })
+              } : k => v if contains(local.logs_off, d.metadata.name)
+            },
+          )
+        })
+      })
+    })
+  }
+
+  others = {
+    for d in local.other_docs : "${d.kind}/${d.metadata.name}" => merge(d, {
+      metadata = merge(d.metadata, { namespace = "train-ticket" })
+    })
+  }
+
+  unknown_services = sort(tolist(setsubtract(setunion(local.logs_off, local.apm_off), keys(local.deployments))))
+}
+
+resource "terraform_data" "telemetry_check" {
+  lifecycle {
+    precondition {
+      condition     = length(local.unknown_services) == 0
+      error_message = "lab/telemetry.yaml names unknown deployments: ${join(", ", local.unknown_services)}"
+    }
+  }
+}
+
+resource "kubernetes_manifest" "others" {
+  for_each = local.others
+  manifest = each.value
+  field_manager {
+    force_conflicts = true
+  }
+  depends_on = [kubernetes_namespace_v1.train_ticket]
+}
+
+resource "kubernetes_manifest" "deployments" {
+  for_each = local.deployments
+  manifest = each.value
+  field_manager {
+    force_conflicts = true
+  }
+  depends_on = [
+    terraform_data.telemetry_check,
+    kubernetes_manifest.others,
+    helm_release.nacos,
+    helm_release.rabbitmq,
+    helm_release.tsdb,
+  ]
+}
