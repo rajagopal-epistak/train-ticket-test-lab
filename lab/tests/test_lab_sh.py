@@ -423,12 +423,34 @@ def test_down_destroys_the_agent_stage_only_when_it_is_ours(lab):
     r = lab.run("trap cleanup EXIT; cmd_down", down_rules(lab, datadog_state="helm_release.operator\n"))
     assert r.returncode == 0, r.stderr
     destroys = [c for c in lab.calls() if c[0] == "terraform" and "destroy" in c]
-    assert [c[1] for c in destroys] == [f"-chdir={lab.path}/lab/terraform/lab", f"-chdir={lab.path}/lab/terraform/datadog"]
+    assert [c[1] for c in destroys] == [f"-chdir={lab.path}/lab/terraform/lab", f"-chdir={lab.path}/lab/terraform/datadog",
+                                        f"-chdir={lab.path}/lab/terraform/datadog"]
     deletes = [c for c in lab.calls() if c[:2] == ["kubectl", "delete"] and "mutatingwebhookconfiguration" in c]
     assert any("datadog-webhook" in c and "--ignore-not-found" in c for c in deletes), lab.calls()
     delete_index = lab.calls().index(deletes[0])
     destroy_index = lab.calls().index(destroys[-1])
     assert delete_index > destroy_index
+
+
+def test_down_destroys_the_agent_release_before_the_rest_and_waits_between(lab):
+    # keepCrds is unset, so destroying the Operator release deletes the DatadogAgentInternal CRD. Destroying
+    # it before the Operator has finalized that object hangs the CRD delete, so the agent release is
+    # destroyed alone first, then lab.sh waits for its DatadogAgentInternal objects to go.
+    r = lab.run("trap cleanup EXIT; cmd_down", down_rules(lab, datadog_state="helm_release.operator\n"))
+    assert r.returncode == 0, r.stderr
+    calls = lab.calls()
+    destroys = [c for c in calls if c[0] == "terraform" and "destroy" in c]
+    assert "-target=helm_release.agent" in destroys[1] and "-target=helm_release.agent" not in destroys[2]
+    waits = [c for c in calls if c[:2] == ["kubectl", "wait"] and "datadogagentinternals" in c]
+    assert any("--for=delete" in c and "--all" in c for c in waits), calls
+    assert calls.index(destroys[1]) < calls.index(waits[0]) < calls.index(destroys[2])
+
+
+def test_down_fails_d3_when_datadogagentinternals_do_not_go_away(lab):
+    rules = down_rules(lab, datadog_state="helm_release.operator\n")
+    rules["kubectl"].append({"match": ["wait", "datadogagentinternals"], "exit": 1})
+    r = lab.run("trap cleanup EXIT; cmd_down", rules)
+    assert r.returncode == 1 and "FAIL D3" in r.stderr
 
 
 def test_agent_secret_keys_never_reach_argv(lab):

@@ -557,6 +557,12 @@ cmd_down() {
   tf_ready datadog
   if tf_has_state datadog; then
     ours=1
+    # The Operator chart leaves keepCrds unset, so destroying it deletes the DatadogAgentInternal CRD. If the
+    # Operator hasn't yet finalized the DatadogAgentInternal object the agent release created, that CRD
+    # delete hangs. Destroy the agent release first and wait for its DatadogAgentInternal objects to go.
+    tf datadog destroy -input=false -auto-approve -target=helm_release.agent || fail D3 "terraform destroy of the agent release failed"
+    kubectl wait --for=delete datadogagentinternals --all -n "$DD_NS" --timeout=300s >/dev/null ||
+      fail D3 "datadogagentinternals still present after the agent release was destroyed"
     tf datadog destroy -input=false -auto-approve || fail D3 "terraform destroy of stage datadog failed"
     # The Cluster Agent creates this webhook with no labels and no ownerReferences, and only deletes it when
     # mutation is disabled, never on shutdown. Neither the Operator's cleanup nor the Helm chart removes it either.
