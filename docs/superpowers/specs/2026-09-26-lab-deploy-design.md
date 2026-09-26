@@ -358,3 +358,12 @@ The plan's code was written and tested in a scratch clone before the plan. That 
 1. **H1:** `down`'s D3 also deletes `mutatingwebhookconfiguration datadog-webhook --ignore-not-found`, since neither Terraform nor the Helm chart removes it. The lost-state teardown gets the same step.
 2. **M1:** the OOMKilled monitor queries `kubernetes.containers.last_state.terminated{reason:oomkilled}`, not `state.terminated`: an OOM-killed container restarts, so its current state is Waiting/CrashLoopBackOff, and the reason lives in `lastState`.
 3. **L1:** `down`'s D1 no longer generates or removes `yamls/deploy.yaml`; it runs `make reset-deploy Namespace=train-ticket` directly, since the tracked `sw_deploy.yaml` already names the same 46 Deployments.
+4. **H2:** every pod template carries `ad.datadoghq.com/tags: {"lab":"<LAB_NAME>"}`. The Kubernetes and log monitors and G7 scope on `lab:<LAB_NAME>`, not on the cluster name or namespace. So labs sharing a Datadog org stay apart, and the Kubernetes monitors also work with a foreign Agent.
+5. **M7:** a new optional input, `KUBELET_TLS_VERIFY` (default `true`), sets the DatadogAgent's `global.kubelet.tlsVerify` when this lab installs the Agent. The README says which distributions need `false`.
+6. **M6:** `test` switches off any fault left on, e.g. by a killed earlier run, before T1. The README states the worst-case run times.
+7. **M9:** D3 destroys the agent release first, waits for its DatadogAgentInternal objects to be deleted, then destroys the Operator.
+8. **Also fixed, with no design change:**
+   - C1, M2–M5, L2, L3, L9, L10;
+   - the tests M8 asked for;
+   - two review findings: the ERR trap now reports only from the top-level shell (R1), and G5 samples the newest pod (R2).
+9. **Deferred to the backlog by the owner:** L4–L8, L11 and L12.
