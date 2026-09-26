@@ -165,6 +165,47 @@ def test_namespace_guard(lab, owner_rules, ok):
     assert (r.returncode == 0) == ok, r.stderr
 
 
+def test_err_trap_catches_an_unguarded_terraform_init_failure(lab):
+    rules = {"terraform": [{"match": ["init"], "exit": 1}]}
+    r = lab.run("trap on_err ERR; p6_telemetry", rules)
+    assert r.returncode == 1 and "FAIL P6" in r.stderr
+
+
+def test_err_trap_catches_an_unguarded_stage_datadog_setup_failure(lab):
+    rules = {"kubectl": [{"match": ["create", "namespace", "datadog"], "exit": 1}]}
+    r = lab.run("trap on_err ERR; stage_datadog", rules, env={**INPUTS, "APM_ENABLED": "true"})
+    assert r.returncode == 1 and "FAIL S1" in r.stderr
+
+
+def test_err_trap_catches_an_unguarded_g3_exec_failure(lab):
+    rules = {"kubectl": [{"match": ["exec", "tsdb-mysql-0"], "exit": 1}]}
+    r = lab.run("trap on_err ERR; g3_mysql", rules)
+    assert r.returncode == 1 and "FAIL G3" in r.stderr
+
+
+def test_err_trap_catches_a_timed_out_datadog_namespace_delete(lab):
+    rules = {
+        "kubectl": [
+            {"match": ["get", "namespace", "train-ticket"], "exit": 1},
+            {"match": ["get", "namespace", "datadog", "jsonpath"], "stdout": "tt-lab-1"},
+            {"match": ["get", "namespace", "datadog"], "exit": 0},
+            {"match": ["delete", "namespace", "datadog"], "exit": 1},
+        ],
+        "terraform": [{"match": ["state", "list"], "stdout": "helm_release.operator\n"}],
+    }
+    r = lab.run("trap cleanup EXIT; trap on_err ERR; cmd_down", rules)
+    assert r.returncode == 1 and "FAIL D3" in r.stderr
+
+
+def test_err_trap_catches_monitor_ids_lookup_failure_before_up_ran(lab):
+    rules = {
+        "terraform": [{"match": ["console"], "stdout": '"false"\n'},
+                      {"match": ["output", "-json", "monitor_ids"], "exit": 1}],
+    }
+    r = lab.run("trap on_err ERR; cmd_test", rules)
+    assert r.returncode == 1 and "FAIL T0" in r.stderr
+
+
 def test_telemetry_names_must_be_known(lab):
     rules = {"terraform": [{"match": ["console"], "stdout": '"[\\"ts-bogus\\"]"\n'}]}
     r = lab.run("p6_telemetry", rules)

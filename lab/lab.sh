@@ -2,7 +2,7 @@
 # Stand up, test and tear down the Train-Ticket lab with Datadog monitoring.
 # Usage: lab/lab.sh up|test|down
 # Inputs are environment variables; lab/README.md lists them. Every step prints PASS <id> or FAIL <id>: <reason>.
-set -euo pipefail
+set -Eeuo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TF_DIR="$REPO/lab/terraform"
@@ -13,10 +13,18 @@ F3_SERVICES="ts-train-service ts-basic-service ts-order-service ts-order-other-s
 AGENT_IMAGE_RE='^(registry\.datadoghq\.com|(eu\.|asia\.)?gcr\.io/datadoghq|public\.ecr\.aws/datadog|datadoghq\.azurecr\.io|(docker\.io/)?datadog)/agent(:|@|$)'
 PINNED_KUBECONFIG=""
 F22_ON=""
+STEP="?"
 
 pass() { echo "PASS $1${2:+: $2}"; }
 fail() { echo "FAIL $1: $2" >&2; exit 1; }
 now() { date +%s; }
+# Backstop for a command that fails without going through an explicit `|| fail ID ...`: -E (errtrace) makes
+# this trap follow into functions and command substitutions, so nothing under set -e exits silently.
+on_err() {
+  local status=$?
+  trap - ERR
+  fail "${STEP:-?}" "unexpected error (exit $status): $BASH_COMMAND"
+}
 
 # poll SECONDS INTERVAL CMD...: succeeds as soon as CMD does, fails when SECONDS have passed.
 poll() {
@@ -34,6 +42,7 @@ cleanup() {
 }
 
 require_inputs() {
+  STEP=P0
   local v missing=""
   for v in KUBE_CONTEXT LAB_NAME DD_SITE DD_API_KEY DD_APP_KEY APM_HOSTS_BUDGET APM_INGEST_GB_BUDGET; do
     [ -n "${!v:-}" ] || missing="$missing $v"
@@ -46,6 +55,7 @@ require_inputs() {
 }
 
 p1_tools() {
+  STEP=P1
   local t
   for t in terraform kubectl helm make curl python3; do
     command -v "$t" >/dev/null || fail P1 "$t not found on PATH"
@@ -59,6 +69,7 @@ sys.exit(0 if v >= (1, 8) else 1)' || fail P1 "terraform 1.8 or later is require
 
 # Every kubectl, helm and Terraform call, including lab/fault.sh, uses a private kubeconfig pinned to KUBE_CONTEXT.
 pin_context() {
+  STEP=P2
   PINNED_KUBECONFIG=$(mktemp)
   chmod 600 "$PINNED_KUBECONFIG"
   kubectl config view --minify --flatten --context="$KUBE_CONTEXT" >"$PINNED_KUBECONFIG" 2>/dev/null ||
@@ -68,6 +79,7 @@ pin_context() {
 }
 
 p2_cluster() {
+  STEP=P2
   local bad
   bad=$(kubectl get nodes -o json | python3 -c '
 import json, sys
@@ -100,6 +112,7 @@ dd_call() {
 }
 
 p3_keys() {
+  STEP=P3
   dd_call GET /api/v1/validate | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("valid") else 1)' ||
     fail P3 "DD_API_KEY is not valid for $DD_SITE"
   dd_call GET "/api/v1/monitor?page_size=1" >/dev/null || fail P3 "DD_APP_KEY cannot read monitors on $DD_SITE"
@@ -118,6 +131,7 @@ ns_owner() {
 }
 
 p4_namespace() {
+  STEP=P4
   local owner
   owner=$(ns_owner "$NS")
   case "$owner" in
@@ -151,6 +165,7 @@ export_tf_vars() {
 }
 
 p6_telemetry() {
+  STEP=P6
   local unknown
   tf_ready lab
   unknown=$(tf_eval lab local.unknown_services) || fail P6 "lab/telemetry.yaml does not parse"
@@ -201,6 +216,7 @@ host_agent_nodes() {
 
 # Sets INSTALL_AGENT. An Agent this lab installed is kept; any other Agent, in the cluster or on a node, means skip.
 p5_agent() {
+  STEP=P5
   local found owner
   tf_ready datadog
   if tf_has_state datadog; then
@@ -233,6 +249,7 @@ p5_agent() {
 wait_for() { poll "$3" 10 kubectl -n "$2" get "$1" >/dev/null 2>&1; }
 
 stage_datadog() {
+  STEP=S1
   kubectl create namespace "$DD_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl label namespace "$DD_NS" --overwrite lab="$LAB_NAME" pod-security.kubernetes.io/enforce=privileged >/dev/null
   kubectl -n "$DD_NS" create secret generic datadog-secret \
@@ -240,6 +257,7 @@ stage_datadog() {
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   tf datadog apply -input=false -auto-approve || fail S1 "terraform apply of stage datadog failed"
   pass S1 "Datadog Operator and Agent applied"
+  STEP=G1
   wait_for deployment/datadog-cluster-agent "$DD_NS" 600 || fail G1 "Cluster Agent deployment not created"
   kubectl -n "$DD_NS" rollout status deployment/datadog-cluster-agent --timeout=600s >/dev/null || fail G1 "Cluster Agent not available"
   wait_for daemonset/datadog-agent "$DD_NS" 600 || fail G1 "Agent DaemonSet not created"
@@ -272,6 +290,7 @@ faults_on() {
 # Terraform owns the Deployments and the flag config; fault.sh patches both. Switch faults off first, so a re-run
 # restores the baseline instead of leaving half a patch (e.g. F3's JVM command with the original memory limit).
 faults_off() {
+  STEP=S2
   local f active
   active=$(faults_on)
   for f in $active; do
@@ -281,6 +300,7 @@ faults_off() {
 }
 
 g2_rollout() {
+  STEP=G2
   if ! kubectl -n "$NS" wait --for=condition=Available deployment --all --timeout=1200s >/dev/null; then
     fail G2 "deployments not available: $(kubectl -n "$NS" get deployments --no-headers | awk '{split($2, r, "/"); if (r[1] != r[2]) printf "%s ", $1}')"
   fi
@@ -293,6 +313,7 @@ g2_rollout() {
 
 # The mysql chart asks for max_connections=65535, which has been seen not to apply; 29 services share tsdb.
 g3_mysql() {
+  STEP=G3
   local pod value
   for pod in tsdb-mysql-0 tsdb-mysql-1 tsdb-mysql-2; do
     value=$(kubectl -n "$NS" exec "$pod" -- mysql -uroot -N -e "SELECT @@max_connections")
@@ -307,6 +328,7 @@ g3_mysql() {
 }
 
 g4_faults() {
+  STEP=G4
   local f active out
   active=$(faults_on)
   [ -z "$active" ] || fail G4 "faults on after apply: $active"
@@ -322,6 +344,7 @@ sample_pod_injected() {
 }
 
 g5_apm() {
+  STEP=G5
   if [ "$APM_ENABLED" != true ] || [ "$INSTALL_AGENT" != true ]; then
     pass G5 "skipped (APM off or Agent not ours)"
     return
@@ -342,6 +365,7 @@ driver_outcomes() {
 }
 
 g6_driver() {
+  STEP=G6
   poll 300 20 driver_outcomes || fail G6 "traffic driver logged fewer than 10 outcomes in 2 minutes"
   pass G6 "traffic driver running"
 }
@@ -363,6 +387,7 @@ driver_logs_seen() {
 
 # Datadog-side checks. With a foreign Agent they only warn: this lab does not control that Agent's features.
 g7_datadog() {
+  STEP=G7
   local miss=""
   if [ "$INSTALL_AGENT" = true ]; then
     poll 600 30 metric_seen "sum:kubernetes.pods.running{kube_cluster_name:$LAB_NAME}" || miss="$miss kubernetes-metrics"
@@ -392,6 +417,7 @@ cmd_up() {
   p5_agent
   if [ "$INSTALL_AGENT" = true ]; then stage_datadog; fi
   if [ "$(ns_owner "$NS")" != absent ]; then faults_off; fi
+  STEP=S3
   tf lab apply -input=false -auto-approve || fail S3 "terraform apply of stage lab failed"
   pass S3 "Train-Ticket, flagd, driver and monitors applied"
   g2_rollout
@@ -433,6 +459,7 @@ cmd_test() {
   require_inputs
   pin_context
   export_tf_vars
+  STEP=T0
   tf_ready datadog
   tf_ready lab
   [ "$(tf_eval lab 'contains(local.logs_off, "tt-traffic-driver")')" = false ] ||
@@ -443,15 +470,18 @@ cmd_test() {
   [ -n "$EDGE_ID" ] || fail T0 "no edge_5xx monitor in the lab state; run up first"
   pass T0 "monitors found"
 
+  STEP=T1
   poll 1200 30 voucher_not_alert || fail T1 "edge 5xx on /getVoucher is already alerting before the test"
   before=$(all_states)
   pass T1 "baseline: $before"
 
+  STEP=T2
   F22_ON=1
   NAMESPACE="$NS" "$REPO/lab/fault.sh" on F22 | grep -q '^tt-feat-22 true$' || fail T2 "flagd does not serve tt-feat-22 on"
   t_on=$(now)
   pass T2 "F22 on"
 
+  STEP=T3
   local deadline=$((t_on + 900))
   t_alert=""
   while [ "$(now)" -lt "$deadline" ]; do
@@ -463,6 +493,7 @@ cmd_test() {
     sleep 30
   done
 
+  STEP=T4
   NAMESPACE="$NS" "$REPO/lab/fault.sh" off F22 | grep -q '^tt-feat-22 false$' || fail T4 "flagd does not serve tt-feat-22 off"
   F22_ON=""
   t_off=$(now)
@@ -493,6 +524,7 @@ cmd_test() {
 # yamls/sw_deploy.yaml is tracked and names the same 46 Deployments as deploy.yaml.sample, so
 # `make reset-deploy`'s own `kubectl delete -f yamls -n <ns>` already removes them; no deploy.yaml needed.
 native_reset() {
+  STEP=D1
   (cd "$REPO" && make reset-deploy Namespace="$NS") >"${TMPDIR:-/tmp}/lab-native-reset.log" 2>&1 || true
   pass D1 "native make reset-deploy ran (log: ${TMPDIR:-/tmp}/lab-native-reset.log)"
 }
@@ -509,9 +541,11 @@ cmd_down() {
   pin_context
   export_tf_vars
   if [ "$(ns_owner "$NS")" = "$LAB_NAME" ]; then native_reset; else pass D1 "namespace $NS not present; native reset skipped"; fi
+  STEP=D2
   tf_ready lab
   tf lab destroy -input=false -auto-approve || fail D2 "terraform destroy of stage lab failed"
   pass D2 "stage lab destroyed"
+  STEP=D3
   tf_ready datadog
   if tf_has_state datadog; then
     ours=1
@@ -524,6 +558,7 @@ cmd_down() {
   else
     pass D3 "Agent not installed by this lab; left alone"
   fi
+  STEP=D4
   poll 600 15 ns_absent "$NS" || fail D4 "namespace $NS still present"
   if [ -n "$ours" ]; then
     [ "$(ns_owner "$DD_NS")" = absent ] || fail D4 "namespace $DD_NS still present"
@@ -536,6 +571,7 @@ cmd_down() {
 
 main() {
   trap cleanup EXIT
+  trap on_err ERR
   case "${1:-}" in
     up) cmd_up ;;
     test) cmd_test ;;
