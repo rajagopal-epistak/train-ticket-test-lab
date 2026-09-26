@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tt-traffic-driver
+  labels:
+    app: tt-traffic-driver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tt-traffic-driver
+  template:
+    metadata:
+      labels:
+        app: tt-traffic-driver
+    spec:
+      containers:
+        - name: driver
+          image: ghcr.io/rajagopal-epistak/tt-traffic-driver:lab
+          imagePullPolicy: Always
+          env:
+            - name: TT_URL
+              value: http://ts-ui-dashboard:8080
+            - name: VOUCHER_URL
+              value: http://ts-voucher-service:16101/getVoucher
+            - name: INTERVAL_SECONDS
+              value: "1"
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}

@@ -22,6 +22,7 @@ import org.springframework.web.client.RestTemplate;
 import java.text.DecimalFormat;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * @author fdse
@@ -33,6 +34,11 @@ public class CancelServiceImpl implements CancelService {
     private RestTemplate restTemplate;
     @Autowired
     private DiscoveryClient discoveryClient;
+
+    @Autowired
+    private FeatureFlagService featureFlagService;
+
+    long refundDelayMs = 8000;
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CancelServiceImpl.class);
 
@@ -61,7 +67,7 @@ public class CancelServiceImpl implements CancelService {
                     CancelServiceImpl.LOGGER.info("[cancelOrder][Cancel Order Success]");
                     //Draw back money
                     String money = calculateRefund(order);
-                    boolean status = drawbackMoney(money, loginId, headers);
+                    boolean status = refund(money, loginId, headers);
                     if (status) {
                         CancelServiceImpl.LOGGER.info("[cancelOrder][Draw Back Money Success]");
 
@@ -118,7 +124,7 @@ public class CancelServiceImpl implements CancelService {
                         CancelServiceImpl.LOGGER.info("[cancelOrder][Cancel Order Success]");
                         //Draw back money
                         String money = calculateRefund(order);
-                        boolean status = drawbackMoney(money, loginId, headers);
+                        boolean status = refund(money, loginId, headers);
                         if (status) {
                             CancelServiceImpl.LOGGER.info("[cancelOrder][Draw Back Money Success]");
                         } else {
@@ -273,6 +279,26 @@ public class CancelServiceImpl implements CancelService {
                 Response.class);
 
         return re.getBody();
+    }
+
+    // F1: with tt-feat-01 on, the refund runs after the cancel has already reported it (events out of order)
+    boolean refund(String money, String userId, HttpHeaders headers) {
+        if (!featureFlagService.isEnabled("tt-feat-01")) {
+            return drawbackMoney(money, userId, headers);
+        }
+        CompletableFuture.runAsync(() -> {
+            try {
+                Thread.sleep(refundDelayMs);
+                if (!drawbackMoney(money, userId, headers)) {
+                    CancelServiceImpl.LOGGER.error("[refund][Draw Back Money Failed][userId: {}]", userId);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (RuntimeException e) {
+                CancelServiceImpl.LOGGER.error("[refund][Draw Back Money Failed][userId: {}]", userId, e);
+            }
+        });
+        return true;
     }
 
     public boolean drawbackMoney(String money, String userId, HttpHeaders headers) {

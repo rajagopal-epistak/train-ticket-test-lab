@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * @author  Administrator
@@ -27,10 +28,14 @@ public class PaymentServiceImpl implements PaymentService{
     @Autowired
     AddMoneyRepository addMoneyRepository;
 
+    @Autowired
+    private FeatureFlagService featureFlagService;
+
     private static final Logger LOGGER = LoggerFactory.getLogger(PaymentServiceImpl.class);
 
     @Override
     public Response pay(Payment info, HttpHeaders headers){
+        thirdPartyDelay();
 
         if(paymentRepository.findByOrderId(info.getOrderId()) == null){
             Payment payment = new Payment();
@@ -42,6 +47,17 @@ public class PaymentServiceImpl implements PaymentService{
         }else{
             PaymentServiceImpl.LOGGER.warn("[pay][Pay Failed][Order not found with order id][PaymentId: {}, OrderId: {}]",info.getId(),info.getOrderId());
             return new Response<>(0, "Pay Failed, order not found with order id" +info.getOrderId(), null);
+        }
+    }
+
+    // F7: with tt-feat-07 on, this third-party payment answers after 1.5-2.5 s
+    private void thirdPartyDelay() {
+        if (featureFlagService.isEnabled("tt-feat-07")) {
+            try {
+                Thread.sleep(1500 + ThreadLocalRandom.current().nextInt(1001));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

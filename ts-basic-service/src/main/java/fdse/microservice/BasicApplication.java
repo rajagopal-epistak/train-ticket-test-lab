@@ -12,6 +12,10 @@ import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.web.client.RestTemplate;
 import springfox.documentation.swagger2.annotations.EnableSwagger2;
 
+import dev.openfeature.contrib.providers.flagd.FlagdProvider;
+import dev.openfeature.sdk.OpenFeatureAPI;
+import javax.annotation.PostConstruct;
+
 /**
  * @author fdse
  */
@@ -31,5 +35,14 @@ public class BasicApplication {
 	@Bean
 	public RestTemplate restTemplate(RestTemplateBuilder builder) {
 		return builder.build();
+	}
+
+	@PostConstruct
+	public void initializeFeatureFlags() {
+		try {
+			OpenFeatureAPI.getInstance().setProvider(new FlagdProvider("flagd", 8013, false, null));
+		} catch (Exception e) {
+			// flags read as off
+		}
 	}
 }
