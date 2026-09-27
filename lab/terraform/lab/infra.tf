@@ -51,9 +51,18 @@ resource "terraform_data" "mysql_root_ipv6" {
       pods=$(kubectl -n train-ticket get pods -l release="$RELEASE" -o name)
       [ -n "$pods" ] || { echo "no pods for MySQL release $RELEASE" >&2; exit 1; }
       for pod in $pods; do
-        init=$(kubectl -n train-ticket exec "$pod" -c mysql -- sh -c 'mysql -uroot -N -e "SELECT
+        # Readiness passes on the entrypoint's temporary server too, which runs first-time init with networking off:
+        # wait for the real server (retrying through the gap between the two), then check what init created.
+        tries=0
+        until read -r net init < <(kubectl -n train-ticket exec "$pod" -c mysql -- sh -c 'mysql -uroot -N -e "SELECT
+          @@skip_networking = 0,
           EXISTS(SELECT 1 FROM mysql.user WHERE user='\''$MYSQL_USER'\'') AND
-          EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='\''$MYSQL_DATABASE'\'')"')
+          EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='\''$MYSQL_DATABASE'\'')"' 2>/dev/null) &&
+          [ "$net" = 1 ]; do
+          tries=$((tries + 1))
+          [ "$tries" -lt 30 ] || { echo "$pod: MySQL still not serving with networking on after 30 tries" >&2; exit 1; }
+          sleep 10
+        done
         [ "$init" = 1 ] || { echo "$pod has no app user or database: its first-time init was cut short." \
           "Delete its PVC (data-<pod name>) and the pod, then re-run up." >&2; exit 1; }
         # Skip pods that have it: once a leader exists, xenon makes followers super_read_only (ERROR 1290).

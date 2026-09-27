@@ -186,7 +186,7 @@ def test_mysql_root_ipv6_step_skips_pods_that_already_have_the_account(tmp_path,
         f'echo "$*" >> {log}\n'
         'case "$*" in\n'
         '  *"get pods"*) printf "pod/tsdb-mysql-0\\npod/tsdb-mysql-1\\n" ;;\n'
-        '  *schemata*) echo 1 ;;\n'
+        '  *schemata*) printf "1\\t1\\n" ;;\n'
         f'  *"SELECT COUNT"*) echo {has_account} ;;\n'
         "esac\n")
     kubectl.chmod(0o755)
@@ -197,26 +197,39 @@ def test_mysql_root_ipv6_step_skips_pods_that_already_have_the_account(tmp_path,
     assert len(created) == (2 if creates else 0)
 
 
-@pytest.mark.parametrize("initialised, ok", [("1", True), ("0", False)])
-def test_mysql_step_fails_on_a_pod_whose_first_init_was_cut_short(tmp_path, initialised, ok):
+@pytest.mark.parametrize("answers, ok, message, execs", [
+    (["1\t1"], True, None, 1),              # the real server, init complete
+    (["1\t0"], False, "PVC", 1),            # the real server, init cut short: fails at once
+    (["0\t0", "", "1\t1"], True, None, 3),  # the temporary server, the gap between the two, then the real server
+    (["0\t0"], False, "30 tries", 30),      # never the real server
+])
+def test_mysql_step_waits_for_the_real_server_then_fails_a_pod_whose_first_init_was_cut_short(
+        tmp_path, answers, ok, message, execs):
     # Live run: the liveness probe killed mysqld during first-time init; the restart skipped init on the non-empty
-    # datadir (no app user, no database), passed readiness (root's SELECT 1), and xenon made it leader.
+    # datadir (no app user, no database), passed readiness (root's SELECT 1), and xenon made it leader. Readiness also
+    # passes on the entrypoint's temporary server (networking off), so Helm's wait returns before the last pod's init.
     log = tmp_path / "kubectl.log"
-    kubectl = tmp_path / "kubectl"
-    kubectl.write_text(
+    (tmp_path / "answers").write_text("".join(f"{a}\n" for a in answers))
+    count = tmp_path / "count"
+    (tmp_path / "kubectl").write_text(
         "#!/usr/bin/env bash\n"
         f'echo "$*" >> {log}\n'
         'case "$*" in\n'
-        '  *"get pods"*) printf "pod/tsdb-mysql-0\\npod/tsdb-mysql-1\\n" ;;\n'
-        f'  *schemata*) echo {initialised} ;;\n'
+        '  *"get pods"*) echo pod/tsdb-mysql-0 ;;\n'
+        f'  *schemata*) n=$(cat {count} 2>/dev/null || echo 0); echo $((n + 1)) > {count}\n'
+        f'    total=$(wc -l < {tmp_path / "answers"}); a=$(sed -n "$(( n < total ? n + 1 : total ))p" {tmp_path / "answers"})\n'
+        '    [ -n "$a" ] || exit 1; printf "%s\\n" "$a" ;;\n'
         '  *"SELECT COUNT"*) echo 0 ;;\n'
         "esac\n")
-    kubectl.chmod(0o755)
+    (tmp_path / "sleep").write_text("#!/bin/sh\n")
+    for name in ("kubectl", "sleep"):
+        (tmp_path / name).chmod(0o755)
     r = subprocess.run(["bash", "-c", heredoc_script("mysql_root_ipv6")], capture_output=True, text=True,
                        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "RELEASE": "tsdb"})
     assert (r.returncode == 0) == ok, r.stderr
+    assert len([line for line in log.read_text().splitlines() if "schemata" in line]) == execs
     if not ok:
-        assert "pod/tsdb-mysql-0" in r.stderr and "PVC" in r.stderr
+        assert "pod/tsdb-mysql-0" in r.stderr and message in r.stderr
         assert "CREATE USER" not in log.read_text()
 
 
@@ -229,14 +242,15 @@ def test_mysql_step_checks_the_pods_own_app_user_and_database(tmp_path):
         '  *"get pods"*) echo pod/tsdb-mysql-0 ;;\n'
         '  *exec*) while [ "$1" != "--" ]; do shift; done; shift; MYSQL_USER=ts MYSQL_DATABASE=ts exec "$@" ;;\n'
         "esac\n")
-    (tmp_path / "mysql").write_text(f'#!/usr/bin/env bash\necho "$*" >> {log}\necho 1\n')
+    (tmp_path / "mysql").write_text(
+        f'#!/usr/bin/env bash\necho "$*" >> {log}\ncase "$*" in *skip_networking*) printf "1\\t1\\n" ;; *) echo 1 ;; esac\n')
     for name in ("kubectl", "mysql"):
         (tmp_path / name).chmod(0o755)
     r = subprocess.run(["bash", "-c", heredoc_script("mysql_root_ipv6")], capture_output=True, text=True,
                        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "RELEASE": "tsdb"})
     assert r.returncode == 0, r.stderr
     queries = log.read_text()
-    assert "user='ts'" in queries and "schema_name='ts'" in queries
+    assert "@@skip_networking = 0" in queries and "user='ts'" in queries and "schema_name='ts'" in queries
 
 
 def test_mysql_releases_give_first_init_a_startup_probe_budget():
