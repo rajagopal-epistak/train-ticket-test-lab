@@ -361,6 +361,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            # The fork builds this image on Spring Boot 2.7, which refuses its SecurityConfig bean cycle.
+            - name: SPRING_MAIN_ALLOWCIRCULARREFERENCES
+              value: "true"
           envFrom:
             - configMapRef:
                 name: nacos
@@ -841,6 +844,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            # The fork builds this image on Spring Boot 2.7, which refuses its SecurityConfig bean cycle.
+            - name: SPRING_MAIN_ALLOWCIRCULARREFERENCES
+              value: "true"
           envFrom:
             - secretRef:
                 name: ts-inside-payment-mysql
@@ -973,6 +979,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            # The fork builds this image on Spring Boot 2.7, which refuses its SecurityConfig bean cycle.
+            - name: SPRING_MAIN_ALLOWCIRCULARREFERENCES
+              value: "true"
           envFrom:
             - secretRef:
                 name: ts-order-other-mysql
@@ -1065,6 +1074,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            # The fork builds this image on Spring Boot 2.7, which refuses its SecurityConfig bean cycle.
+            - name: SPRING_MAIN_ALLOWCIRCULARREFERENCES
+              value: "true"
           envFrom:
             - secretRef:
                 name: ts-payment-mysql

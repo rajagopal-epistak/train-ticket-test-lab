@@ -12,6 +12,13 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}
+        {{- with .Values.podLabels }}
+{{ toYaml . | indent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+{{ toYaml . | indent 8 }}
+      {{- end }}
     spec:
       containers:
         - name: rabbitmq

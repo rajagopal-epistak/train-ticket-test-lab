@@ -105,6 +105,29 @@ sys.exit(0 if any((s["metadata"].get("annotations") or {}).get("storageclass.kub
   pass P2 "cluster"
 }
 
+# kind's known issue "Pod errors due to too many open files": ~60 JVMs, Nacos's file watchers, containerd and the
+# kubelet share each node's inotify limits. At Ubuntu's default of 128 instances, services crash-looped and Nacos
+# died with "User limit of inotify instances reached" (live run 4). kind's fix is 512 instances, 524288 watches.
+p2_inotify() {
+  STEP=P2
+  local node instances watches low=""
+  probe_ns_up
+  for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
+    read -r _ instances watches <<<"$(node_probe "$node" 'echo INOTIFY $(cat /proc/sys/fs/inotify/max_user_instances) $(cat /proc/sys/fs/inotify/max_user_watches)' | grep '^INOTIFY ' || true)"
+    if ! [[ "${instances:-}" =~ ^[0-9]+$ && "${watches:-}" =~ ^[0-9]+$ ]]; then
+      kubectl delete namespace tt-lab-probe --wait=false >/dev/null
+      fail P2 "inotify probe on $node produced no result (image pull, a policy denial, a timeout, or a leftover pod)"
+    fi
+    if [ "$instances" -lt 512 ] || [ "$watches" -lt 524288 ]; then
+      low="$low $node (max_user_instances=$instances, max_user_watches=$watches)"
+    fi
+  done
+  # Wait for it to go: P5 may create it again right away, and a terminating namespace refuses new pods.
+  kubectl delete namespace tt-lab-probe --timeout=120s >/dev/null
+  [ -z "$low" ] || fail P2 "inotify limits below 512 instances and 524288 watches on:$low; raise them on every node (README Prerequisites)"
+  pass P2 "node inotify limits"
+}
+
 # dd_call METHOD PATH [JSON]: prints the response body; succeeds on HTTP 2xx. Keys go through curl's stdin config, never argv.
 dd_call() {
   local method=$1 path=$2 data=${3:-} out code
@@ -192,8 +215,22 @@ for ds in json.load(sys.stdin)["items"]:
         print(ds["metadata"]["namespace"] + "/" + ds["metadata"]["name"])' "$AGENT_IMAGE_RE" | tr '\n' ' '
 }
 
+# probe_overrides NODE POD SCRIPT: a busybox pod pinned to NODE that runs SCRIPT, with the host's /etc read-only at
+# /host/etc. SCRIPT goes into the JSON as is, so it must not contain double quotes or backslashes.
 probe_overrides() {
-  printf '{"spec":{"nodeName":"%s","tolerations":[{"operator":"Exists"}],"volumes":[{"name":"etc","hostPath":{"path":"/etc","type":"Directory"}}],"containers":[{"name":"%s","image":"docker.io/library/busybox:1.37","stdin":true,"command":["sh","-c","if test -f /host/etc/datadog-agent/datadog.yaml; then echo DATADOG_CONFIG_PRESENT; else echo DATADOG_CONFIG_ABSENT; fi"],"volumeMounts":[{"name":"etc","mountPath":"/host/etc","readOnly":true}]}]}}' "$1" "$2"
+  printf '{"spec":{"nodeName":"%s","tolerations":[{"operator":"Exists"}],"volumes":[{"name":"etc","hostPath":{"path":"/etc","type":"Directory"}}],"containers":[{"name":"%s","image":"docker.io/library/busybox:1.37","stdin":true,"command":["sh","-c","%s"],"volumeMounts":[{"name":"etc","mountPath":"/host/etc","readOnly":true}]}]}}' "$1" "$2" "$3"
+}
+
+probe_ns_up() {
+  kubectl create namespace tt-lab-probe --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl label namespace tt-lab-probe --overwrite pod-security.kubernetes.io/enforce=privileged >/dev/null
+}
+
+# node_probe NODE SCRIPT: prints SCRIPT's output from a probe pod on NODE, or nothing if the pod could not run.
+node_probe() {
+  local pod="probe-$RANDOM"
+  kubectl -n tt-lab-probe run "$pod" --rm -i --restart=Never --quiet --pod-running-timeout=3m \
+    --image=docker.io/library/busybox:1.37 --overrides="$(probe_overrides "$1" "$pod" "$2")" 2>/dev/null || true
 }
 
 # Prints the nodes whose OS has the Datadog Agent package config (/etc/datadog-agent/datadog.yaml). Every
@@ -202,13 +239,10 @@ probe_overrides() {
 # leftover terminating probe from the last run), and a missing marker must not read as "no Agent" -- that
 # is the case D3 exists to prevent -- so it fails P5 instead.
 host_agent_nodes() {
-  local node pod out found=""
-  kubectl create namespace tt-lab-probe --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  kubectl label namespace tt-lab-probe --overwrite pod-security.kubernetes.io/enforce=privileged >/dev/null
+  local node out found=""
+  probe_ns_up
   for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
-    pod="probe-$RANDOM"
-    out=$(kubectl -n tt-lab-probe run "$pod" --rm -i --restart=Never --quiet --pod-running-timeout=3m \
-      --image=docker.io/library/busybox:1.37 --overrides="$(probe_overrides "$node" "$pod")" 2>/dev/null || true)
+    out=$(node_probe "$node" 'if test -f /host/etc/datadog-agent/datadog.yaml; then echo DATADOG_CONFIG_PRESENT; else echo DATADOG_CONFIG_ABSENT; fi')
     case "$out" in
       *DATADOG_CONFIG_PRESENT*) found="$found $node" ;;
       *DATADOG_CONFIG_ABSENT*) ;;
@@ -265,7 +299,7 @@ stage_datadog() {
   kubectl -n "$DD_NS" create secret generic datadog-secret \
     --from-env-file=<(printf 'api-key=%s\napp-key=%s\n' "$DD_API_KEY" "$DD_APP_KEY") \
     --dry-run=client -o yaml | kubectl apply --server-side -f - >/dev/null
-  tf datadog apply -input=false -auto-approve || fail S1 "terraform apply of stage datadog failed"
+  tf datadog apply -input=false -auto-approve -no-color || fail S1 "terraform apply of stage datadog failed"
   pass S1 "Datadog Operator and Agent applied"
   STEP=G1
   wait_for deployment/datadog-cluster-agent "$DD_NS" 600 || fail G1 "Cluster Agent deployment not created"
@@ -423,6 +457,7 @@ cmd_up() {
   p1_tools
   pin_context
   p2_cluster
+  p2_inotify
   p3_keys
   p4_namespace
   export_tf_vars
@@ -431,7 +466,7 @@ cmd_up() {
   if [ "$INSTALL_AGENT" = true ]; then stage_datadog; fi
   if [ "$(ns_owner "$NS")" != absent ]; then faults_off; fi
   STEP=S3
-  tf lab apply -input=false -auto-approve || fail S3 "terraform apply of stage lab failed"
+  tf lab apply -input=false -auto-approve -no-color || fail S3 "terraform apply of stage lab failed"
   pass S3 "Train-Ticket, flagd, driver and monitors applied"
   g2_rollout
   g3_mysql
@@ -452,6 +487,11 @@ print(next((g["status"] for k, g in groups.items() if k.endswith(":" + sys.argv[
 
 monitor_state() {
   dd_call GET "/api/v1/monitor/$1" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("overall_state", "Unknown"))'
+}
+
+# F22 only shows on /getVoucher, and the driver calls it only for paid high-speed orders it booked itself.
+voucher_traffic() {
+  kubectl -n "$NS" logs deployment/tt-traffic-driver --since=10m 2>/dev/null | grep -q '"path":"/getVoucher"'
 }
 
 voucher_is() { [ "$(monitor_group_state "$EDGE_ID" /getVoucher)" = "$1" ]; }
@@ -488,6 +528,7 @@ cmd_test() {
   faults_off
 
   STEP=T1
+  poll 1200 30 voucher_traffic || fail T1 "the driver made no /getVoucher calls in 20 minutes; it needs paid high-speed orders (check its log)"
   poll 1200 30 voucher_not_alert || fail T1 "edge 5xx on /getVoucher is already alerting before the test"
   before=$(all_states)
   pass T1 "baseline: $before"
@@ -561,7 +602,7 @@ cmd_down() {
   if [ "$ns_before" = "$LAB_NAME" ]; then native_reset; else pass D1 "namespace $NS not present; native reset skipped"; fi
   STEP=D2
   tf_ready lab
-  tf lab destroy -input=false -auto-approve || fail D2 "terraform destroy of stage lab failed"
+  tf lab destroy -input=false -auto-approve -no-color || fail D2 "terraform destroy of stage lab failed"
   pass D2 "stage lab destroyed"
   STEP=D3
   tf_ready datadog
@@ -570,10 +611,10 @@ cmd_down() {
     # The Operator chart leaves keepCrds unset, so destroying it deletes the DatadogAgentInternal CRD. If the
     # Operator hasn't yet finalized the DatadogAgentInternal object the agent release created, that CRD
     # delete hangs. Destroy the agent release first and wait for its DatadogAgentInternal objects to go.
-    tf datadog destroy -input=false -auto-approve -target=helm_release.agent || fail D3 "terraform destroy of the agent release failed"
+    tf datadog destroy -input=false -auto-approve -no-color -target=helm_release.agent || fail D3 "terraform destroy of the agent release failed"
     kubectl wait --for=delete datadogagentinternals --all -n "$DD_NS" --timeout=300s >/dev/null ||
       fail D3 "datadogagentinternals still present after the agent release was destroyed"
-    tf datadog destroy -input=false -auto-approve || fail D3 "terraform destroy of stage datadog failed"
+    tf datadog destroy -input=false -auto-approve -no-color || fail D3 "terraform destroy of stage datadog failed"
     # The Cluster Agent creates this webhook with no labels and no ownerReferences, and only deletes it when
     # mutation is disabled, never on shutdown. Neither the Operator's cleanup nor the Helm chart removes it either.
     kubectl delete mutatingwebhookconfiguration datadog-webhook --ignore-not-found >/dev/null

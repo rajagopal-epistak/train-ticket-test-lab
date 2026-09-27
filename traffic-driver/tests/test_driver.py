@@ -1,5 +1,6 @@
 import datetime
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -7,6 +8,9 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import driver  # noqa: E402
+from autoquery import queries  # noqa: E402
+
+TRIPINFO = Path(__file__).resolve().parents[2] / "ts-common/src/main/java/edu/fudan/common/entity/TripInfo.java"
 
 TRIPS_URL = "http://ts-ui-dashboard:8080/api/v1/travelservice/trips/left"
 RESERVED = {"status", "msg", "message", "level", "severity"}
@@ -109,3 +113,19 @@ def test_voucher_scenario_skips_when_there_are_no_orders():
 def test_weights_include_the_lab_scenarios():
     assert driver.WEIGHTS[driver.query_and_get_voucher] > 0
     assert all(w > 0 for w in driver.WEIGHTS.values())
+
+
+def test_trip_queries_send_the_fields_tripinfo_binds():
+    # Live run: auto-query sends startingPlace, but this version's TripInfo binds startPlace. The controller then
+    # sees no start place and answers a bare [], so the driver never books an order and never asks for a voucher.
+    fields = set(re.findall(r"private \w+ (\w+);", TRIPINFO.read_text()))
+    sent = []
+    q = queries.Query("http://ts-ui-dashboard:8080")
+    q.session.post = lambda url, **kw: sent.append(kw["json"]) or response(url, body={"data": []}, method="POST")
+    q.query_high_speed_ticket(("Shang Hai", "Su Zhou"))
+    q.query_normal_ticket(("Shang Hai", "Nan Jing"))
+    q.query_high_speed_ticket_parallel(("Shang Hai", "Su Zhou"))
+    q.query_advanced_ticket(("Shang Hai", "Su Zhou"))
+    assert len(sent) == 4
+    for payload in sent:
+        assert {"startPlace", "endPlace", "departureTime"} <= set(payload) and set(payload) <= fields, payload

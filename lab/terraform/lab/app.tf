@@ -62,7 +62,16 @@ locals {
     )
   }
 
-  unknown_services = sort(tolist(setsubtract(setunion(local.logs_off, local.apm_off), keys(local.deployments))))
+  # The chart workloads take the same switches, by release name, through their podLabels/podAnnotations values.
+  chart_releases = ["nacos", "nacosdb", "rabbitmq", "tsdb"]
+  chart_pod_meta = {
+    for r in local.chart_releases : r => {
+      podLabels      = { for k, v in { "admission.datadoghq.com/enabled" = "false" } : k => v if contains(local.apm_off, r) }
+      podAnnotations = { for k, v in { "ad.datadoghq.com/logs_exclude" = "true" } : k => v if contains(local.logs_off, r) }
+    }
+  }
+
+  unknown_services = sort(tolist(setsubtract(setunion(local.logs_off, local.apm_off), concat(keys(local.deployments), local.chart_releases))))
 }
 
 resource "terraform_data" "telemetry_check" {
@@ -101,5 +110,6 @@ resource "kubernetes_manifest" "deployments" {
     helm_release.rabbitmq,
     helm_release.tsdb,
     terraform_data.mysql_root_ipv6,
+    terraform_data.nacos_double_write_off,
   ]
 }

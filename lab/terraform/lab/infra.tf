@@ -22,6 +22,7 @@ resource "helm_release" "nacosdb" {
   namespace       = kubernetes_namespace_v1.train_ticket.metadata[0].name
   timeout         = 1800
   upgrade_install = true
+  values          = [yamlencode(local.chart_pod_meta["nacosdb"])]
   set = [
     { name = "mysql.mysqlUser", value = "nacos" },
     { name = "mysql.mysqlPassword", value = "Abcd1234#" },
@@ -61,6 +62,7 @@ resource "helm_release" "nacos" {
   namespace       = kubernetes_namespace_v1.train_ticket.metadata[0].name
   timeout         = 1800
   upgrade_install = true
+  values          = [yamlencode(local.chart_pod_meta["nacos"])]
   set = [
     { name = "nacos.db.host", value = "nacosdb-mysql-leader" },
     { name = "nacos.db.username", value = "nacos" },
@@ -70,12 +72,46 @@ resource "helm_release" "nacos" {
   depends_on = [terraform_data.mysql_root_ipv6["nacosdb"]]
 }
 
+# Nacos 2.0.1 in cluster mode starts in 1.x compatibility ("double write") and serves gRPC only once every member
+# passes its upgrade check. On the live run that check never passed ("upgrade check result false" every 5 s), so
+# every service's register was refused: "can't accept gRPC request temporarily ... close Double write to force open
+# 2.0 mode". 2.0.1 has no startup property for it (only standalone mode skips the check); Nacos's documented switch
+# is the operator API below. The switch lives in Nacos's memory and a restarted pod loses it, so this runs on
+# every apply: re-running `up` puts it back.
+resource "terraform_data" "nacos_double_write_off" {
+  triggers_replace = [timestamp()]
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    environment = { KUBECONFIG = var.kubeconfig }
+    command     = <<-EOT
+      set -euo pipefail
+      pods=$(kubectl -n train-ticket get pods -l app=nacos -o name)
+      [ -n "$pods" ] || { echo "no Nacos pods" >&2; exit 1; }
+      for pod in $pods; do
+        # A member answers once its HTTP port is up. The PUT is idempotent; the GET confirms the switch took.
+        # 127.0.0.1, not localhost (IPv6 loopback first) or `hostname -i` (two addresses on a dual-stack pod).
+        tries=0
+        until kubectl -n train-ticket exec "$pod" -c k8snacos -- sh -c '
+          base=127.0.0.1:8848/nacos/v1/ns/operator/switches
+          curl -sf -m 5 -X PUT "$base?entry=doubleWriteEnabled&value=false" >/dev/null &&
+            curl -sf -m 5 "$base" | grep -q doubleWriteEnabled.:false'; do
+          tries=$((tries + 1))
+          [ "$tries" -lt 30 ] || { echo "Nacos $pod still has double write on after 30 tries" >&2; exit 1; }
+          sleep 10
+        done
+      done
+    EOT
+  }
+  depends_on = [helm_release.nacos]
+}
+
 resource "helm_release" "rabbitmq" {
   name            = "rabbitmq"
   chart           = "${local.charts}/rabbitmq"
   namespace       = kubernetes_namespace_v1.train_ticket.metadata[0].name
   timeout         = 900
   upgrade_install = true
+  values          = [yamlencode(local.chart_pod_meta["rabbitmq"])]
 }
 
 resource "helm_release" "tsdb" {
@@ -84,6 +120,7 @@ resource "helm_release" "tsdb" {
   namespace       = kubernetes_namespace_v1.train_ticket.metadata[0].name
   timeout         = 1800
   upgrade_install = true
+  values          = [yamlencode(local.chart_pod_meta["tsdb"])]
   set = [
     { name = "mysql.mysqlUser", value = "ts" },
     { name = "mysql.mysqlPassword", value = "Ts_123456" },

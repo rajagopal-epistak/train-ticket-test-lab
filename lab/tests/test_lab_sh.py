@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -169,6 +170,28 @@ def test_host_probe_fails_p5_when_a_pod_cannot_run_at_all(lab):
     assert any(c[:3] == ["kubectl", "delete", "namespace"] and "tt-lab-probe" in c for c in lab.calls())
 
 
+@pytest.mark.parametrize("answer, ok, runs", [
+    ("INOTIFY 8192 1048576\n", True, 2), ("INOTIFY 128 524288\n", False, 2), ("INOTIFY 512 65536\n", False, 2), ("", False, 1)])
+def test_p2_checks_every_nodes_inotify_limits(lab, answer, ok, runs):
+    # Live run 4: at Ubuntu's default of 128 inotify instances, services crash-looped and Nacos died with
+    # "User limit of inotify instances reached". kind's known-issues fix is 512 instances and 524288 watches.
+    rules = {"kubectl": [NODES, {"match": ["tt-lab-probe run"], "stdout": answer}]}
+    r = lab.run("p2_inotify", rules)
+    assert (r.returncode == 0) == ok, r.stderr
+    if not ok:
+        assert "FAIL P2" in r.stderr and "node-a" in r.stderr
+    assert len([c for c in lab.calls() if c[:1] == ["kubectl"] and "run" in c]) == runs
+    assert any(c[:3] == ["kubectl", "delete", "namespace"] and "tt-lab-probe" in c for c in lab.calls())
+
+
+def test_terraform_apply_and_destroy_print_no_colour_codes():
+    # Live run: the up log carried Terraform's ANSI colour codes; agents and log files read this output.
+    text = (REPO / "lab" / "lab.sh").read_text()
+    calls = re.findall(r"\btf \w+ (?:apply|destroy)\b[^\n]*", text)
+    assert len(calls) >= 3
+    assert all("-no-color" in c for c in calls), calls
+
+
 @pytest.mark.parametrize("owner_rules, ok", [
     ([{"match": ["get", "namespace", "train-ticket"], "exit": 1}], True),
     ([{"match": ["jsonpath"], "stdout": "tt-lab-1"}], True),
@@ -296,6 +319,8 @@ def up_sequencing_rules(train_ticket_owner):
         ]
     kubectl_rules = [
         *owner_rules,
+        {"match": ["get", "nodes", "jsonpath"], "stdout": "node-a"},
+        {"match": ["tt-lab-probe run"], "stdout": "INOTIFY 8192 1048576\n"},
         {"match": ["get", "nodes", "-o", "json"], "stdout": json.dumps({"items": [
             {"metadata": {"name": "node-a", "labels": {"kubernetes.io/arch": "amd64"}},
              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}]})},
@@ -428,8 +453,9 @@ def test_g7_kubernetes_metric_check_scopes_to_the_lab_tag(lab):
     assert "kube_cluster_name" not in call[-1]
 
 
+VOUCHER_CALLS = {"match": ["logs", "tt-traffic-driver"], "stdout": '{"evt":"outcome","method":"POST","path":"/getVoucher"}\n'}
 TEST_RULES_BASE = {
-    "kubectl": [],
+    "kubectl": [VOUCHER_CALLS],
     "terraform": [
         {"match": ["console"], "stdout": '"false"\n'},
         {"match": ["output", "-json", "monitor_ids"], "stdout": json.dumps({"edge_5xx": "11", "voucher_errors": "12"})},
@@ -480,11 +506,21 @@ def test_test_clears_a_leftover_f22_before_the_baseline_check(lab):
         {"match": ["monitor/12"], "seq": [{"stdout": '{"overall_state": "OK"}'}, {"stdout": '{"overall_state": "Alert"}'}]},
         {"match": ["monitor/11"], "stdout": '{"overall_state": "OK"}'},
     )
-    rules["kubectl"] = [{"match": ["configmap", "flagd-config"], "stdout": FLAGS_ON_22_AND_5}]
+    rules["kubectl"] = [VOUCHER_CALLS, {"match": ["configmap", "flagd-config"], "stdout": FLAGS_ON_22_AND_5}]
     r = lab.run("trap cleanup EXIT; cmd_test", rules)
     assert r.returncode == 0, r.stderr
     faults = [line for line in lab.log.read_text().splitlines() if line.startswith("fault.sh")]
     assert faults == ["fault.sh off F22", "fault.sh on F22", "fault.sh off F22"]
+
+
+def test_t1_fails_fast_when_the_driver_makes_no_voucher_calls(lab):
+    # Live run: the driver never booked an order, so it never called /getVoucher; F22 was switched on anyway and
+    # T3 waited 15 minutes for an alert that could not come.
+    rules = with_curl({"match": ["monitor/11?group_states=all"], "stdout": group("OK")["stdout"]})
+    rules["kubectl"] = [{"match": ["logs", "tt-traffic-driver"], "stdout": '{"evt":"outcome","path":"/api/v1/x"}\n'}]
+    r = lab.run("trap cleanup EXIT; cmd_test", rules)
+    assert r.returncode == 1 and "FAIL T1" in r.stderr and "/getVoucher" in r.stderr
+    assert "fault.sh on F22" not in lab.log.read_text()
 
 
 def test_t2_failure_still_switches_f22_off(lab):

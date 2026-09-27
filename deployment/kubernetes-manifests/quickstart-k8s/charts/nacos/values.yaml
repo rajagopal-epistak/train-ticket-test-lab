@@ -55,3 +55,7 @@ nodeSelector: { }
 tolerations: [ ]
 
 affinity: { }
+
+# Added to the pod template, e.g. by the lab's telemetry switches
+podLabels: { }
+podAnnotations: { }

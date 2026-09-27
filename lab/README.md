@@ -37,7 +37,10 @@ With mise: `mise use terraform@1.16 helm@3 kubectl@1`.
 - x86_64 nodes only; the images are amd64;
 - a default StorageClass;
 - about 8 CPU and 32 GiB free;
-- a kubeconfig context with cluster-admin. The Datadog Operator installs CRDs and cluster roles, and the host check uses `hostPath`.
+- a kubeconfig context with cluster-admin. The Datadog Operator installs CRDs and cluster roles, and the host check uses `hostPath`;
+- inotify limits of at least 512 instances and 524288 watches on every node. Ubuntu's default of 128 instances makes the services crash-loop. On each node: `printf 'fs.inotify.max_user_watches = 524288\nfs.inotify.max_user_instances = 512\n' | sudo tee /etc/sysctl.d/99-inotify.conf && sudo sysctl --system`.
+
+Known limitation: `ts-avatar-service` (upstream image) needs a CPU with AVX. On a VM with a generic CPU model (e.g. `QEMU Virtual CPU`), its face-detection library traps with "invalid opcode" and the service never answers. No fault or monitor uses it; host CPU passthrough fixes it.
 
 **Datadog:**
 - an API key;
@@ -87,15 +90,15 @@ Each step prints `PASS <id>` or `FAIL <id>: <reason>`, and the first FAIL stops 
 |---|---|
 | P0 | the inputs are present and well-formed |
 | P1 | the tools are on `PATH`; Terraform is 1.8 or later |
-| P2 | the context exists; every node is Ready and amd64; there is a default StorageClass |
+| P2 | the context exists; every node is Ready and amd64; there is a default StorageClass; every node's inotify limits are at least 512 instances and 524288 watches (a probe pod per node) |
 | P3 | the API key is valid and the application key can read monitors |
 | P4 | namespace `train-ticket` is absent, or labelled `lab=<LAB_NAME>` |
-| P6 | `lab/telemetry.yaml` names only known deployments |
+| P6 | `lab/telemetry.yaml` names only known deployments and chart releases |
 | P5 | Agent decision: keep this lab's Agent. Skip the install if any other Agent runs in the cluster, or is installed on a node's OS (`/etc/datadog-agent/datadog.yaml`). Otherwise install it. |
 | S1 | Terraform stage `datadog`: the Datadog Operator (chart 2.27.0) and a DatadogAgent (Agent 7.83.3) with logs, Kubernetes state metrics and APM Single Step Instrumentation for `train-ticket` |
 | G1 | the Cluster Agent and every node Agent are ready; admission webhook `datadog-webhook` exists |
 | S2 | any fault that is on is switched off, so the apply restores the baseline |
-| S3 | Terraform stage `lab`: namespace, MySQL × 2, Nacos, RabbitMQ, 46 services, flagd, traffic driver, monitors |
+| S3 | Terraform stage `lab`: namespace, MySQL × 2, Nacos (with its 1.x double write switched off), RabbitMQ, 46 services, flagd, traffic driver, monitors |
 | G2 | every deployment and statefulset in `train-ticket` is ready (20 min budget) |
 | G3 | tsdb MySQL `max_connections` is at least 500 (set on every run; MySQL forgets it on restart) |
 | G4 | all eight faults are off, and flagd serves every flag as off |
@@ -108,7 +111,7 @@ Each step prints `PASS <id>` or `FAIL <id>: <reason>`, and the first FAIL stops 
 | Id | Checks or does |
 |---|---|
 | T0 | the monitors exist, and `tt-traffic-driver` is not in `logs_off` |
-| T1 | baseline: the Edge 5xx monitor's `/getVoucher` group is not alerting (waits up to 20 min) |
+| T1 | baseline: the driver called `/getVoucher` in the last 10 min, and the Edge 5xx monitor's `/getVoucher` group is not alerting (each waits up to 20 min) |
 | T2 | `lab/fault.sh on F22`, and flagd serves it on |
 | T3 | the Edge 5xx monitor's `/getVoucher` group reaches Alert within 15 min |
 | T4 | `lab/fault.sh off F22`, and the group is back to OK within 15 min |
@@ -154,7 +157,7 @@ logs_off: [ts-news-service]    # adds pod annotation ad.datadoghq.com/logs_exclu
 apm_off: [tt-traffic-driver]   # adds pod label admission.datadoghq.com/enabled: "false"
 ```
 
-Names are deployment names: the 46 `ts-*` services, `tt-traffic-driver`, and `flagd`. Run `lab/lab.sh up` again to apply; Kubernetes rolls the listed deployments. The switches live on the pods, so they also work with an Agent this lab did not install. Leave `tt-traffic-driver` out of `logs_off`: every log monitor and the `test` pass signal read its logs.
+Names are deployment names (the 46 `ts-*` services, `tt-traffic-driver`, and `flagd`) or chart releases (`nacos`, `nacosdb`, `tsdb`, `rabbitmq`). Run `lab/lab.sh up` again to apply; Kubernetes rolls the listed deployments, and Helm rolls a listed chart's pods. A MySQL or Nacos release rolls its three replicas one at a time. The switches live on the pods, so they also work with an Agent this lab did not install. Leave `tt-traffic-driver` out of `logs_off`: every log monitor and the `test` pass signal read its logs.
 
 ## Costs
 
@@ -170,6 +173,7 @@ Names are deployment names: the 46 `ts-*` services, `tt-traffic-driver`, and `fl
 | P0 | an input is missing, or `LAB_NAME` isn't a lowercase DNS label | `env \| grep -E 'KUBE_CONTEXT\|LAB_NAME\|DD_\|APM_'` |
 | P1 | a tool is missing, or Terraform is older than 1.8 | `terraform version` |
 | P2 | wrong context, a NotReady or arm64 node, or no default StorageClass | `kubectl --context $KUBE_CONTEXT get nodes -L kubernetes.io/arch; kubectl get storageclass` |
+| P2 | a node's inotify limits are too low (the FAIL line names the node and its values), or the probe pod couldn't run | raise them as in Prerequisites; with no result, check that the node can pull `docker.io/library/busybox:1.37` |
 | P3 | wrong key or wrong site | `curl -s -H "DD-API-KEY: $DD_API_KEY" https://api.$DD_SITE/api/v1/validate` |
 | P4 | `train-ticket` belongs to another lab, or to a manual `make deploy` | `kubectl get namespace train-ticket --show-labels` |
 | P5 | namespace `datadog` exists and is not this lab's | `kubectl get namespace datadog --show-labels` |
@@ -179,6 +183,7 @@ Names are deployment names: the 46 `ts-*` services, `tt-traffic-driver`, and `fl
 | S2 | `lab/fault.sh off` failed | run `lab/fault.sh status <F>` for the named fault |
 | S3 | Terraform apply of the lab failed; the error names the resource. `Helm release error … context deadline exceeded` means a StatefulSet release outlasted its 30 min timeout | `kubectl -n train-ticket get pods`, then re-run `up`: it is idempotent, and it upgrades a timed-out release in place (`helm upgrade --install`) |
 | S3 | Nacos `initmysql` crash-loops with `Can't connect to MySQL server on 'nacosdb-mysql-leader'`: no MySQL pod is `role=leader`. Stage `lab` adds a `root@'::1'` account on every MySQL pod right after each MySQL release (the vendored RadonDB chart lacks it, so xenon can't health-check MySQL over IPv6 loopback) | `kubectl -n train-ticket get pods -l 'release in (nacosdb,tsdb)' -L role`; if none is leader, re-run `up` |
+| S3 | `Nacos nacos-N still has double write on after 30 tries`: that Nacos member never answered its HTTP API | `kubectl -n train-ticket logs nacos-0 --tail=50`, then re-run `up` |
 | G2 | a service can't start (often MySQL or Nacos still starting, or the quota) | `kubectl -n train-ticket get pods \| grep -v Running; kubectl -n train-ticket describe pod <pod>` |
 | G3 | MySQL not answering | `kubectl -n train-ticket exec tsdb-mysql-0 -- mysql -uroot -e 'SELECT 1'` |
 | G4 | a fault is still on, or flagd isn't serving | `lab/fault.sh status F22; kubectl -n train-ticket logs deploy/flagd` |
@@ -187,6 +192,7 @@ Names are deployment names: the 46 `ts-*` services, `tt-traffic-driver`, and `fl
 | G7 | Datadog isn't receiving data; check the Agent status | `kubectl -n datadog exec ds/datadog-agent -- agent status` |
 | G7 | kubelet or Kubernetes metrics missing on a distribution needing TLS verification off | re-run `up` with `KUBELET_TLS_VERIFY=false` |
 | T0 | `up` hasn't run for this `LAB_NAME`, or the driver's logs are switched off | `terraform -chdir=lab/terraform/lab output monitor_ids` |
+| T1 | the driver made no `/getVoucher` calls: it books no paid high-speed orders (right after `up`, the first bookings can outlast the dashboard's 60 s proxy timeout) | `kubectl -n train-ticket logs deploy/tt-traffic-driver --tail=50 \| grep -E 'preserve\|getVoucher\|Traceback'` |
 | T1 | `/getVoucher` is already failing | `kubectl -n train-ticket logs deploy/ts-voucher-service --tail=50` |
 | T2, T4 | flagd didn't pick up the flag | `lab/fault.sh status F22` |
 | T3 | no alert: check the driver's `/getVoucher` outcomes in Datadog Logs (`service:tt-traffic-driver @path:/getVoucher`) | the Edge 5xx monitor page in Datadog |
@@ -205,4 +211,4 @@ Names are deployment names: the 46 `ts-*` services, `tt-traffic-driver`, and `fl
 - **Images:** `.github/workflows/lab-images.yaml` builds the six changed services and the driver to `ghcr.io/rajagopal-epistak/*:lab` on push.
 - **Java:** `hack/lab/mvn.sh <module> test`.
 - **Python, shell and Terraform:** `mise exec terraform@1.16.4 helm@3 -- uv run --no-project --with pytest==8.3.3 --with pyyaml==6.0.2 --with requests==2.32.3 --with tornado==6.5.10 --with pymysql==1.2.3 pytest lab traffic-driver ts-voucher-service/tests -q`.
-- **auto-query:** `traffic-driver/autoquery/` is an unmodified copy of FudanSELab/train-ticket-auto-query at `9d5bc2d`.
+- **auto-query:** `traffic-driver/autoquery/` is a copy of FudanSELab/train-ticket-auto-query at `9d5bc2d`, with one change recorded in its `SOURCE`: the trip queries send `startPlace`, the field this version's `TripInfo` binds.

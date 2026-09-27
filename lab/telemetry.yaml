@@ -1,4 +1,4 @@
-# Per-service telemetry switches. List Deployment names (the 46 ts-* services, tt-traffic-driver, flagd).
-# Edit, then run `lab/lab.sh up` again; Kubernetes rolls the listed Deployments.
+# Per-service telemetry switches. List Deployment names (the 46 ts-* services, tt-traffic-driver, flagd) or chart
+# releases (nacos, nacosdb, tsdb, rabbitmq). Edit, then run `lab/lab.sh up` again; the listed pods roll.
 logs_off: []   # log collection off, e.g. [ts-news-service]
 apm_off: []    # APM instrumentation off, e.g. [tt-traffic-driver]

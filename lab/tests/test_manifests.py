@@ -10,6 +10,9 @@ UPSTREAM = "313886e9"
 LAB = {"ts-basic-service", "ts-order-other-service", "ts-inside-payment-service", "ts-payment-service", "ts-cancel-service",
        "ts-voucher-service"}
 REVERTED = {"ts-contacts-service"}  # xlab's F22 variant is not deployed; the lab's F22 lives in ts-voucher-service
+# Lab images built on the fork's Spring Boot 2.7 whose upstream SecurityConfig forms a bean cycle (live run 5).
+SPRING_CYCLE = {"ts-basic-service", "ts-inside-payment-service", "ts-order-other-service", "ts-payment-service"}
+ALLOW_CYCLE = {"name": "SPRING_MAIN_ALLOWCIRCULARREFERENCES", "value": "true"}
 
 
 def containers(text):
@@ -43,8 +46,16 @@ def test_every_other_deployment_is_unchanged():
     for name in base.keys() - LAB - REVERTED:
         assert current[name] == base[name], name
     for name in LAB:
-        strip = lambda c: {k: v for k, v in c.items() if k not in ("image", "imagePullPolicy")}
+        strip = lambda c: {k: v for k, v in c.items() if k not in ("image", "imagePullPolicy")} | {
+            "env": [e for e in c.get("env", []) if e != ALLOW_CYCLE]}
         assert strip(current[name]) == strip(base[name]), name
+
+
+def test_lab_images_with_the_security_bean_cycle_allow_circular_references():
+    # Spring Boot 2.6+ refuses circular references; its release notes name spring.main.allow-circular-references
+    # as the way back when the cycle can't be broken. Only the four lab images that fail on start get it.
+    current = dict(containers((REPO / SAMPLE).read_text()))
+    assert {name for name, c in current.items() if ALLOW_CYCLE in c.get("env", [])} == SPRING_CYCLE
 
 
 def test_flagd_manifest_is_namespace_free_and_reads_the_flag_configmap():
