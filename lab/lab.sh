@@ -216,9 +216,16 @@ for ds in json.load(sys.stdin)["items"]:
 }
 
 # probe_overrides NODE POD SCRIPT: a busybox pod pinned to NODE that runs SCRIPT, with the host's /etc read-only at
-# /host/etc. SCRIPT goes into the JSON as is, so it must not contain double quotes or backslashes.
+# /host/etc. json.dumps escapes SCRIPT, so it may contain any text.
 probe_overrides() {
-  printf '{"spec":{"nodeName":"%s","tolerations":[{"operator":"Exists"}],"volumes":[{"name":"etc","hostPath":{"path":"/etc","type":"Directory"}}],"containers":[{"name":"%s","image":"docker.io/library/busybox:1.37","command":["sh","-c","%s"],"volumeMounts":[{"name":"etc","mountPath":"/host/etc","readOnly":true}]}]}}' "$1" "$2" "$3"
+  python3 -c '
+import json, sys
+node, pod, script = sys.argv[1:]
+print(json.dumps({"spec": {
+    "nodeName": node, "tolerations": [{"operator": "Exists"}],
+    "volumes": [{"name": "etc", "hostPath": {"path": "/etc", "type": "Directory"}}],
+    "containers": [{"name": pod, "image": "docker.io/library/busybox:1.37", "command": ["sh", "-c", script],
+                    "volumeMounts": [{"name": "etc", "mountPath": "/host/etc", "readOnly": True}]}]}}))' "$1" "$2" "$3"
 }
 
 probe_ns_up() {

@@ -267,3 +267,23 @@ def test_nacos_step_retries_each_member_until_the_switch_reads_off(tmp_path, cod
                        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"})
     assert (r.returncode == 0) == ok, r.stderr
     assert len([line for line in log.read_text().splitlines() if line.startswith("-n train-ticket exec")]) == execs
+
+
+@pytest.mark.parametrize("value, ok", [("false", True), ("true", False)])
+def test_nacos_step_reads_the_switch_back_from_a_nacos_shaped_body(tmp_path, value, ok):
+    # Runs the real in-pod script: the fake kubectl executes what follows `--` locally, against a fake curl that
+    # answers the PUT with "ok" and the GET with compact JSON, the shape Nacos 2.0.1 returned on the live run.
+    body = '{"masters":null,"adWeightMap":{},"defaultPushCacheMillis":10000,"doubleWriteEnabled":%s,"distroEnabled":true}'
+    (tmp_path / "kubectl").write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$*" in\n'
+        '  *"get pods"*) echo pod/nacos-0 ;;\n'
+        '  *exec*) while [ "$1" != "--" ]; do shift; done; shift; exec "$@" ;;\n'
+        "esac\n")
+    (tmp_path / "curl").write_text(f"#!/usr/bin/env bash\ncase \"$*\" in *PUT*) echo ok ;; *) echo '{body % value}' ;; esac\n")
+    (tmp_path / "sleep").write_text("#!/bin/sh\n")
+    for name in ("kubectl", "curl", "sleep"):
+        (tmp_path / name).chmod(0o755)
+    r = subprocess.run(["bash", "-c", heredoc_script("nacos_double_write_off")], capture_output=True, text=True,
+                       env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"})
+    assert (r.returncode == 0) == ok, r.stderr

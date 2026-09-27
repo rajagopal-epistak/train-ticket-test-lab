@@ -177,6 +177,16 @@ def test_node_probe_reads_the_finished_pods_log_instead_of_attaching(lab):
     assert "stdin" not in overrides["spec"]["containers"][0]
 
 
+def test_probe_overrides_carry_any_script_text_as_valid_json(lab):
+    script = """echo "quoted" 'single' back\\slash $(cat /x)"""
+    r = lab.run('probe_overrides node-a probe-1 "$SCRIPT"', {}, env={**INPUTS, "SCRIPT": script})
+    assert r.returncode == 0, r.stderr
+    spec = json.loads(r.stdout)["spec"]
+    assert spec["nodeName"] == "node-a" and spec["containers"][0]["name"] == "probe-1"
+    assert spec["containers"][0]["command"] == ["sh", "-c", script]
+    assert spec["volumes"][0]["hostPath"] == {"path": "/etc", "type": "Directory"}
+
+
 def test_node_probe_prints_nothing_and_still_deletes_when_the_pod_never_succeeds(lab):
     rules = {"kubectl": [{"match": ["tt-lab-probe wait"], "exit": 1},
                          {"match": ["tt-lab-probe logs"], "stdout": "partial\n"}]}
@@ -205,6 +215,7 @@ def test_p2_checks_every_nodes_inotify_limits(lab, answer, ok, runs):
     assert (r.returncode == 0) == ok, r.stderr
     if not ok:
         assert "FAIL P2" in r.stderr and "node-a" in r.stderr
+        assert ("node-b" in r.stderr) == (runs == 2), r.stderr
     assert len([c for c in lab.calls() if c[:1] == ["kubectl"] and "run" in c]) == runs
     assert any(c[:3] == ["kubectl", "delete", "namespace"] and "tt-lab-probe" in c for c in lab.calls())
 
