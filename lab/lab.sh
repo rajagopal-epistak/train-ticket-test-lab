@@ -503,8 +503,9 @@ monitor_state() {
 }
 
 # F22 only shows on /getVoucher, and the driver calls it only for paid high-speed orders it booked itself.
+# grep reads to the end, not -q: after -q's first match the log writer dies of SIGPIPE, and pipefail fails the pipeline.
 voucher_traffic() {
-  kubectl -n "$NS" logs deployment/tt-traffic-driver --since=10m 2>/dev/null | grep -q '"path":"/getVoucher"'
+  kubectl -n "$NS" logs deployment/tt-traffic-driver --since=10m 2>/dev/null | grep '"path":"/getVoucher"' >/dev/null
 }
 
 voucher_is() { [ "$(monitor_group_state "$EDGE_ID" /getVoucher)" = "$1" ]; }

@@ -559,6 +559,21 @@ def test_t1_fails_fast_when_the_driver_makes_no_voucher_calls(lab):
     assert "fault.sh on F22" not in lab.log.read_text()
 
 
+def test_t1_finds_voucher_calls_in_a_log_longer_than_a_pipe_buffer(lab):
+    # Live run: 42 /getVoucher calls, yet T1 failed. `grep -q` exits at the first match, the log writer then dies of
+    # SIGPIPE, and under pipefail the pipeline fails; the 1569-line log outlasted the pipe buffer.
+    rules = with_curl(
+        {"match": ["monitor/11?group_states=all"], "seq": [group("OK"), group("OK"), group("Alert"), group("OK")]},
+        {"match": ["monitor/12"], "seq": [{"stdout": '{"overall_state": "OK"}'}, {"stdout": '{"overall_state": "Alert"}'}]},
+        {"match": ["monitor/11"], "stdout": '{"overall_state": "OK"}'},
+    )
+    other = '{"evt":"outcome","method":"GET","path":"/api/v1/orderservice/order/refresh","http_status":200}\n'
+    rules["kubectl"] = [{**VOUCHER_CALLS, "stdout": VOUCHER_CALLS["stdout"] + other * 12000}]
+    r = lab.run("trap cleanup EXIT; cmd_test", rules)
+    assert r.returncode == 0, r.stderr
+    assert "FAIL T1" not in r.stderr
+
+
 def test_t2_failure_still_switches_f22_off(lab):
     fault = lab.path / "lab" / "fault.sh"
     fault.write_text('#!/usr/bin/env bash\necho "fault.sh $*" >> "$STUB_LOG"\n'
