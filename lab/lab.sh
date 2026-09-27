@@ -218,7 +218,7 @@ for ds in json.load(sys.stdin)["items"]:
 # probe_overrides NODE POD SCRIPT: a busybox pod pinned to NODE that runs SCRIPT, with the host's /etc read-only at
 # /host/etc. SCRIPT goes into the JSON as is, so it must not contain double quotes or backslashes.
 probe_overrides() {
-  printf '{"spec":{"nodeName":"%s","tolerations":[{"operator":"Exists"}],"volumes":[{"name":"etc","hostPath":{"path":"/etc","type":"Directory"}}],"containers":[{"name":"%s","image":"docker.io/library/busybox:1.37","stdin":true,"command":["sh","-c","%s"],"volumeMounts":[{"name":"etc","mountPath":"/host/etc","readOnly":true}]}]}}' "$1" "$2" "$3"
+  printf '{"spec":{"nodeName":"%s","tolerations":[{"operator":"Exists"}],"volumes":[{"name":"etc","hostPath":{"path":"/etc","type":"Directory"}}],"containers":[{"name":"%s","image":"docker.io/library/busybox:1.37","command":["sh","-c","%s"],"volumeMounts":[{"name":"etc","mountPath":"/host/etc","readOnly":true}]}]}}' "$1" "$2" "$3"
 }
 
 probe_ns_up() {
@@ -226,11 +226,16 @@ probe_ns_up() {
   kubectl label namespace tt-lab-probe --overwrite pod-security.kubernetes.io/enforce=privileged >/dev/null
 }
 
-# node_probe NODE SCRIPT: prints SCRIPT's output from a probe pod on NODE, or nothing if the pod could not run.
+# node_probe NODE SCRIPT: prints SCRIPT's output from a probe pod on NODE, or nothing if the pod did not succeed.
+# Not `kubectl run -i --rm`: its attach can miss the output of a container that exits in milliseconds (live run).
 node_probe() {
   local pod="probe-$RANDOM"
-  kubectl -n tt-lab-probe run "$pod" --rm -i --restart=Never --quiet --pod-running-timeout=3m \
-    --image=docker.io/library/busybox:1.37 --overrides="$(probe_overrides "$1" "$pod" "$2")" 2>/dev/null || true
+  if kubectl -n tt-lab-probe run "$pod" --restart=Never --image=docker.io/library/busybox:1.37 \
+    --overrides="$(probe_overrides "$1" "$pod" "$2")" >/dev/null 2>&1 &&
+    kubectl -n tt-lab-probe wait "pod/$pod" --for=jsonpath='{.status.phase}'=Succeeded --timeout=180s >/dev/null 2>&1; then
+    kubectl -n tt-lab-probe logs "$pod" 2>/dev/null || true
+  fi
+  kubectl -n tt-lab-probe delete pod "$pod" --wait=false --ignore-not-found >/dev/null 2>&1 || true
 }
 
 # Prints the nodes whose OS has the Datadog Agent package config (/etc/datadog-agent/datadog.yaml). Every
@@ -252,7 +257,8 @@ host_agent_nodes() {
         ;;
     esac
   done
-  kubectl delete namespace tt-lab-probe --wait=false >/dev/null
+  # Wait for it to go, as P2 does: a probe right after a terminating namespace can't create its pod.
+  kubectl delete namespace tt-lab-probe --timeout=120s >/dev/null
   echo "${found# }"
 }
 

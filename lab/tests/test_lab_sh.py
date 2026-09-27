@@ -124,12 +124,12 @@ NODES = {"match": ["get", "nodes", "jsonpath"], "stdout": "node-a node-b"}
     ("host install",
      {"kubectl": [{"match": ["get", "daemonsets"], "stdout": daemonsets(
          ("kube-system", "cluster-agent-lookalike", {}, "gcr.io/datadoghq/cluster-agent:7.83.3"))},
-         NODES, {"match": ["tt-lab-probe run", "node-b"], "stdout": "DATADOG_CONFIG_PRESENT\n"},
-         {"match": ["tt-lab-probe run"], "stdout": "DATADOG_CONFIG_ABSENT\n"}, NO_DATADOG_NS]},
+         NODES, {"match": ["tt-lab-probe logs"], "seq": [{"stdout": "DATADOG_CONFIG_ABSENT\n"},
+                                                          {"stdout": "DATADOG_CONFIG_PRESENT\n"}]}, NO_DATADOG_NS]},
      "false", "node-b"),
     ("none",
      {"kubectl": [{"match": ["get", "daemonsets"], "stdout": daemonsets()}, NODES,
-                  {"match": ["tt-lab-probe run"], "stdout": "DATADOG_CONFIG_ABSENT\n"}, NO_DATADOG_NS]},
+                  {"match": ["tt-lab-probe logs"], "stdout": "DATADOG_CONFIG_ABSENT\n"}, NO_DATADOG_NS]},
      "true", "no Agent found"),
 ])
 def test_agent_decision(lab, case, rules, install, reason):
@@ -148,7 +148,7 @@ def test_agent_install_refuses_a_datadog_namespace_owned_by_someone_else(lab):
 
 
 def test_host_probe_mounts_etc_read_only_and_cleans_up(lab):
-    rules = {"kubectl": [NODES, {"match": ["tt-lab-probe run"], "stdout": "DATADOG_CONFIG_ABSENT\n"}]}
+    rules = {"kubectl": [NODES, {"match": ["tt-lab-probe logs"], "stdout": "DATADOG_CONFIG_ABSENT\n"}]}
     r = lab.run("host_agent_nodes", rules)
     assert r.returncode == 0, r.stderr
     runs = [c for c in lab.calls() if c[:1] == ["kubectl"] and "run" in c]
@@ -158,6 +158,31 @@ def test_host_probe_mounts_etc_read_only_and_cleans_up(lab):
     assert volume == {"path": "/etc", "type": "Directory"}
     assert overrides["spec"]["containers"][0]["volumeMounts"][0]["readOnly"] is True
     assert any(c[:3] == ["kubectl", "delete", "namespace"] and "tt-lab-probe" in c for c in lab.calls())
+
+
+def test_node_probe_reads_the_finished_pods_log_instead_of_attaching(lab):
+    # Live run: `kubectl run -i --rm` lost the output of a container that exits in milliseconds (the attach
+    # race), so P2 failed on a node whose limits were fine. Run, wait for Succeeded, read the log, delete.
+    rules = {"kubectl": [{"match": ["tt-lab-probe logs"], "stdout": "INOTIFY 512 524288\n"}]}
+    r = lab.run("node_probe node-a 'echo hi'", rules)
+    assert r.returncode == 0 and r.stdout == "INOTIFY 512 524288\n", r.stderr
+    calls = [c for c in lab.calls() if c[:3] == ["kubectl", "-n", "tt-lab-probe"]]
+    verbs = [c[3] for c in calls]
+    assert verbs == ["run", "wait", "logs", "delete"], calls
+    assert "-i" not in calls[0] and "--rm" not in calls[0]
+    assert "--for=jsonpath={.status.phase}=Succeeded" in calls[1]
+    name = calls[0][4]
+    assert calls[1][4] == f"pod/{name}" and calls[2][4] == name and calls[3][4:6] == ["pod", name]
+    overrides = json.loads(next(a for a in calls[0] if a.startswith("--overrides=")).split("=", 1)[1])
+    assert "stdin" not in overrides["spec"]["containers"][0]
+
+
+def test_node_probe_prints_nothing_and_still_deletes_when_the_pod_never_succeeds(lab):
+    rules = {"kubectl": [{"match": ["tt-lab-probe wait"], "exit": 1},
+                         {"match": ["tt-lab-probe logs"], "stdout": "partial\n"}]}
+    r = lab.run("node_probe node-a 'echo hi'", rules)
+    assert r.returncode == 0 and r.stdout == "", r.stderr
+    assert any(c[:4] == ["kubectl", "-n", "tt-lab-probe", "delete"] for c in lab.calls())
 
 
 def test_host_probe_fails_p5_when_a_pod_cannot_run_at_all(lab):
@@ -175,7 +200,7 @@ def test_host_probe_fails_p5_when_a_pod_cannot_run_at_all(lab):
 def test_p2_checks_every_nodes_inotify_limits(lab, answer, ok, runs):
     # Live run 4: at Ubuntu's default of 128 inotify instances, services crash-looped and Nacos died with
     # "User limit of inotify instances reached". kind's known-issues fix is 512 instances and 524288 watches.
-    rules = {"kubectl": [NODES, {"match": ["tt-lab-probe run"], "stdout": answer}]}
+    rules = {"kubectl": [NODES, {"match": ["tt-lab-probe logs"], "stdout": answer}]}
     r = lab.run("p2_inotify", rules)
     assert (r.returncode == 0) == ok, r.stderr
     if not ok:
@@ -320,7 +345,7 @@ def up_sequencing_rules(train_ticket_owner):
     kubectl_rules = [
         *owner_rules,
         {"match": ["get", "nodes", "jsonpath"], "stdout": "node-a"},
-        {"match": ["tt-lab-probe run"], "stdout": "INOTIFY 8192 1048576\n"},
+        {"match": ["tt-lab-probe logs"], "stdout": "INOTIFY 8192 1048576\n"},
         {"match": ["get", "nodes", "-o", "json"], "stdout": json.dumps({"items": [
             {"metadata": {"name": "node-a", "labels": {"kubernetes.io/arch": "amd64"}},
              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}]})},

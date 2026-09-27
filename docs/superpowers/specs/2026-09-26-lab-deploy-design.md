@@ -380,3 +380,4 @@ The plan's code was written and tested in a scratch clone before the plan. That 
 8. **The driver's trip queries send `startPlace`.** auto-query `9d5bc2d` sends `startingPlace`, which this version's `TripInfo` doesn't bind, so the driver never booked an order, never called `/getVoucher`, and F22 could not be detected. T1 now waits for the driver's `/getVoucher` calls before switching F22 on.
 9. **Terraform apply and destroy run with `-no-color`,** so logs and agents read plain text.
 10. **`down` deletes the validating `datadog-webhook` too,** and D4 checks both kinds: the first live `down` left the validating one behind (the H1 fix only covered the mutating one).
+11. **The node probes (P2, P5) run the pod, wait for `Succeeded` and read its log,** instead of `kubectl run -i --rm`, whose attach lost the output of the millisecond-long container on the first clean run. Both probes wait for their namespace to be deleted before the next step.
