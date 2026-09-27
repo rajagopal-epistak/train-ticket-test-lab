@@ -152,6 +152,17 @@ spec:
           timeoutSeconds: {{ .Values.mysql.livenessProbe.timeoutSeconds }}
           successThreshold: {{ .Values.mysql.livenessProbe.successThreshold }}
           failureThreshold: {{ .Values.mysql.livenessProbe.failureThreshold }}
+        {{- with .Values.mysql.startupProbe }}
+        startupProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - mysqladmin ping -uroot{{ if not $.Values.mysql.allowEmptyRootPassword }} -p${MYSQL_ROOT_PASSWORD}{{ end }}
+          periodSeconds: {{ .periodSeconds }}
+          timeoutSeconds: {{ $.Values.mysql.livenessProbe.timeoutSeconds }}
+          failureThreshold: {{ .failureThreshold }}
+        {{- end }}
         readinessProbe:
           exec:
             command:

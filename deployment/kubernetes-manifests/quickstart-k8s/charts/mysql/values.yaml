@@ -53,6 +53,10 @@ mysql:
     successThreshold: 1
     failureThreshold: 3
 
+  ## Off when empty. Set periodSeconds and failureThreshold to give first-time init longer than the liveness
+  ## probe allows: liveness starts once this probe, which runs the liveness command, first passes.
+  startupProbe: {}
+
   readinessProbe:
     initialDelaySeconds: 10
     periodSeconds: 10

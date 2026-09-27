@@ -87,6 +87,7 @@ The following table lists the configurable parameters of the RadonDB MySQL chart
 | `mysql.livenessProbe.timeoutSeconds`         | When the mysql probe times out                                                                    | 5                                           |
 | `mysql.livenessProbe.successThreshold`       | Minimum consecutive successes for the mysql probe to be considered successful after having failed.| 1                                           |
 | `mysql.livenessProbe.failureThreshold`       | Minimum consecutive failures for the mysql probe to be considered failed after having succeeded.  | 3                                           |
+| `mysql.startupProbe`                         | Startup probe `periodSeconds` and `failureThreshold`, running the liveness command; empty is off  | `{}`                                        |
 | `mysql.readinessProbe.initialDelaySeconds`   | Delay before mysql readiness probe is initiated                                                   | 10                                          |
 | `mysql.readinessProbe.periodSeconds`         | How often to perform the mysql probe                                                              | 10                                          |
 | `mysql.readinessProbe.timeoutSeconds`        | When the mysql probe times out                                                                    | 1                                           |

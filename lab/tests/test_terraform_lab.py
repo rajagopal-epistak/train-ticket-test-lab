@@ -186,6 +186,7 @@ def test_mysql_root_ipv6_step_skips_pods_that_already_have_the_account(tmp_path,
         f'echo "$*" >> {log}\n'
         'case "$*" in\n'
         '  *"get pods"*) printf "pod/tsdb-mysql-0\\npod/tsdb-mysql-1\\n" ;;\n'
+        '  *schemata*) echo 1 ;;\n'
         f'  *"SELECT COUNT"*) echo {has_account} ;;\n'
         "esac\n")
     kubectl.chmod(0o755)
@@ -194,6 +195,72 @@ def test_mysql_root_ipv6_step_skips_pods_that_already_have_the_account(tmp_path,
     assert r.returncode == 0, r.stderr
     created = [line for line in log.read_text().splitlines() if "CREATE USER" in line]
     assert len(created) == (2 if creates else 0)
+
+
+@pytest.mark.parametrize("initialised, ok", [("1", True), ("0", False)])
+def test_mysql_step_fails_on_a_pod_whose_first_init_was_cut_short(tmp_path, initialised, ok):
+    # Live run: the liveness probe killed mysqld during first-time init; the restart skipped init on the non-empty
+    # datadir (no app user, no database), passed readiness (root's SELECT 1), and xenon made it leader.
+    log = tmp_path / "kubectl.log"
+    kubectl = tmp_path / "kubectl"
+    kubectl.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$*" >> {log}\n'
+        'case "$*" in\n'
+        '  *"get pods"*) printf "pod/tsdb-mysql-0\\npod/tsdb-mysql-1\\n" ;;\n'
+        f'  *schemata*) echo {initialised} ;;\n'
+        '  *"SELECT COUNT"*) echo 0 ;;\n'
+        "esac\n")
+    kubectl.chmod(0o755)
+    r = subprocess.run(["bash", "-c", heredoc_script("mysql_root_ipv6")], capture_output=True, text=True,
+                       env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "RELEASE": "tsdb"})
+    assert (r.returncode == 0) == ok, r.stderr
+    if not ok:
+        assert "pod/tsdb-mysql-0" in r.stderr and "PVC" in r.stderr
+        assert "CREATE USER" not in log.read_text()
+
+
+def test_mysql_step_checks_the_pods_own_app_user_and_database(tmp_path):
+    # Runs the real in-pod query: the fake kubectl executes what follows `--` locally, with the chart's env.
+    log = tmp_path / "mysql.log"
+    (tmp_path / "kubectl").write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$*" in\n'
+        '  *"get pods"*) echo pod/tsdb-mysql-0 ;;\n'
+        '  *exec*) while [ "$1" != "--" ]; do shift; done; shift; MYSQL_USER=ts MYSQL_DATABASE=ts exec "$@" ;;\n'
+        "esac\n")
+    (tmp_path / "mysql").write_text(f'#!/usr/bin/env bash\necho "$*" >> {log}\necho 1\n')
+    for name in ("kubectl", "mysql"):
+        (tmp_path / name).chmod(0o755)
+    r = subprocess.run(["bash", "-c", heredoc_script("mysql_root_ipv6")], capture_output=True, text=True,
+                       env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "RELEASE": "tsdb"})
+    assert r.returncode == 0, r.stderr
+    queries = log.read_text()
+    assert "user='ts'" in queries and "schema_name='ts'" in queries
+
+
+def test_mysql_releases_give_first_init_a_startup_probe_budget():
+    # Live run: first-time init took 107 s with six MySQL pods starting at once, past the liveness budget (30 s + 3 × 10 s).
+    infra = (STAGE / "infra.tf").read_text()
+    blocks = dict(re.findall(r'resource "helm_release" "(\w+)" \{(.*?)\n\}', infra, re.S))
+    assert all("local.mysql_startup_probe" in blocks[name] for name in ("nacosdb", "tsdb"))
+    probe = yaml.safe_load(evaluate("local.mysql_startup_probe"))["mysql"]["startupProbe"]
+    assert probe["periodSeconds"] * probe["failureThreshold"] >= 600
+
+
+@pytest.mark.parametrize("root_password", [[], ["--set", "mysql.allowEmptyRootPassword=false"]])
+def test_mysql_chart_renders_a_startup_probe_with_the_liveness_command_only_when_set(root_password):
+    def mysql_container(*args):
+        r = subprocess.run(["helm", "template", "x", str(CHARTS / "mysql"), *root_password, *args],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        sts = next(d for d in yaml.safe_load_all(r.stdout) if d and d["kind"] == "StatefulSet")
+        return next(c for c in sts["spec"]["template"]["spec"]["containers"] if c["name"] == "mysql")
+    on = mysql_container("--set", "mysql.startupProbe.periodSeconds=10", "--set", "mysql.startupProbe.failureThreshold=60")
+    assert on["startupProbe"]["exec"] == on["livenessProbe"]["exec"]
+    assert on["startupProbe"]["timeoutSeconds"] == on["livenessProbe"]["timeoutSeconds"]
+    assert (on["startupProbe"]["periodSeconds"], on["startupProbe"]["failureThreshold"]) == (10, 60)
+    assert "startupProbe" not in mysql_container()
 
 
 def test_chart_workloads_take_the_telemetry_switches(tmp_path):

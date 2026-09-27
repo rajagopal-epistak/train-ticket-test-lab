@@ -3,6 +3,10 @@
 locals {
   repo   = abspath("${path.module}/../../..")
   charts = "${local.repo}/deployment/kubernetes-manifests/quickstart-k8s/charts"
+  # First-time init of six MySQL pods at once took 107 s on the live run, and the chart's liveness probe (30 s + 3 × 10 s)
+  # killed it; the restart skipped init on the non-empty datadir. Kubernetes' remedy is a startup probe running the
+  # liveness command, with failureThreshold × periodSeconds covering the worst case startup.
+  mysql_startup_probe = yamlencode({ mysql = { startupProbe = { periodSeconds = 10, failureThreshold = 60 } } })
 }
 
 resource "kubernetes_namespace_v1" "train_ticket" {
@@ -22,7 +26,7 @@ resource "helm_release" "nacosdb" {
   namespace       = kubernetes_namespace_v1.train_ticket.metadata[0].name
   timeout         = 1800
   upgrade_install = true
-  values          = [yamlencode(local.chart_pod_meta["nacosdb"])]
+  values          = [yamlencode(local.chart_pod_meta["nacosdb"]), local.mysql_startup_probe]
   set = [
     { name = "mysql.mysqlUser", value = "nacos" },
     { name = "mysql.mysqlPassword", value = "Abcd1234#" },
@@ -34,6 +38,8 @@ resource "helm_release" "nacosdb" {
 # xenon's health check (root@localhost:3306) arrives from ::1, is denied under skip-name-resolve, and no leader is
 # ever elected, so the -leader Service stays empty (upstream train-ticket #234, #233, #246, #268). RadonDB's own fix
 # (radondb-mysql-kubernetes #441) is a root@::1 account; add it on every pod, outside the binlog.
+# First, each pod must have the app user and database its first-time init creates: an init cut short leaves neither,
+# still passes readiness (root's SELECT 1), and xenon may make that pod leader, which Nacos then can't log in to.
 resource "terraform_data" "mysql_root_ipv6" {
   for_each         = { nacosdb = helm_release.nacosdb.metadata, tsdb = helm_release.tsdb.metadata }
   triggers_replace = [each.value]
@@ -45,6 +51,11 @@ resource "terraform_data" "mysql_root_ipv6" {
       pods=$(kubectl -n train-ticket get pods -l release="$RELEASE" -o name)
       [ -n "$pods" ] || { echo "no pods for MySQL release $RELEASE" >&2; exit 1; }
       for pod in $pods; do
+        init=$(kubectl -n train-ticket exec "$pod" -c mysql -- sh -c 'mysql -uroot -N -e "SELECT
+          EXISTS(SELECT 1 FROM mysql.user WHERE user='\''$MYSQL_USER'\'') AND
+          EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='\''$MYSQL_DATABASE'\'')"')
+        [ "$init" = 1 ] || { echo "$pod has no app user or database: its first-time init was cut short." \
+          "Delete its PVC (data-<pod name>) and the pod, then re-run up." >&2; exit 1; }
         # Skip pods that have it: once a leader exists, xenon makes followers super_read_only (ERROR 1290).
         has=$(kubectl -n train-ticket exec "$pod" -c mysql -- mysql -uroot -N -e \
           "SELECT COUNT(*) FROM mysql.user WHERE user='root' AND host='::1'")
@@ -120,7 +131,7 @@ resource "helm_release" "tsdb" {
   namespace       = kubernetes_namespace_v1.train_ticket.metadata[0].name
   timeout         = 1800
   upgrade_install = true
-  values          = [yamlencode(local.chart_pod_meta["tsdb"])]
+  values          = [yamlencode(local.chart_pod_meta["tsdb"]), local.mysql_startup_probe]
   set = [
     { name = "mysql.mysqlUser", value = "ts" },
     { name = "mysql.mysqlPassword", value = "Ts_123456" },
