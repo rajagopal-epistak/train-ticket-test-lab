@@ -594,7 +594,7 @@ monitors_left() {
 }
 
 cmd_down() {
-  local ours="" ns_before
+  local ours="" ns_before kind
   require_inputs
   pin_context
   export_tf_vars
@@ -615,9 +615,9 @@ cmd_down() {
     kubectl wait --for=delete datadogagentinternals --all -n "$DD_NS" --timeout=300s >/dev/null ||
       fail D3 "datadogagentinternals still present after the agent release was destroyed"
     tf datadog destroy -input=false -auto-approve -no-color || fail D3 "terraform destroy of stage datadog failed"
-    # The Cluster Agent creates this webhook with no labels and no ownerReferences, and only deletes it when
-    # mutation is disabled, never on shutdown. Neither the Operator's cleanup nor the Helm chart removes it either.
-    kubectl delete mutatingwebhookconfiguration datadog-webhook --ignore-not-found >/dev/null
+    # The Cluster Agent creates a mutating and a validating datadog-webhook with no labels and no ownerReferences,
+    # and never deletes them on shutdown. Neither the Operator's cleanup nor the Helm chart removes them either.
+    kubectl delete mutatingwebhookconfiguration,validatingwebhookconfiguration datadog-webhook --ignore-not-found >/dev/null
     if [ "$(ns_owner "$DD_NS")" = "$LAB_NAME" ]; then kubectl delete namespace "$DD_NS" --timeout=600s >/dev/null; fi
     pass D3 "stage datadog destroyed"
   else
@@ -631,7 +631,9 @@ cmd_down() {
   fi
   if [ -n "$ours" ]; then
     [ "$(ns_owner "$DD_NS")" = absent ] || fail D4 "namespace $DD_NS still present"
-    ! kubectl get mutatingwebhookconfiguration datadog-webhook >/dev/null 2>&1 || fail D4 "webhook datadog-webhook still present"
+    for kind in mutatingwebhookconfiguration validatingwebhookconfiguration; do
+      ! kubectl get "$kind" datadog-webhook >/dev/null 2>&1 || fail D4 "$kind datadog-webhook still present"
+    done
   fi
   [ "$(monitors_left)" = 0 ] || fail D4 "monitors tagged lab:$LAB_NAME remain"
   pass D4 "lab $LAB_NAME removed"

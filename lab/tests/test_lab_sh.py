@@ -567,7 +567,7 @@ def down_rules(lab, datadog_state="", train_ticket_owner="tt-lab-1", datadog_nam
         "kubectl": [
             *owner_rules,
             {"match": ["get", "namespace", "datadog"], "exit": datadog_namespace_exit},
-            {"match": ["get", "mutatingwebhookconfiguration"], "exit": 1},
+            {"match": ["get", "webhookconfiguration", "datadog-webhook"], "exit": 1},
         ],
         "make": [{"match": ["reset-deploy", "Namespace=train-ticket"], "exists": deploy_yaml}],
         "terraform": [{"match": ["state", "list"], "stdout": datadog_state}],
@@ -627,8 +627,10 @@ def test_down_destroys_the_agent_stage_only_when_it_is_ours(lab):
     destroys = [c for c in lab.calls() if c[0] == "terraform" and "destroy" in c]
     assert [c[1] for c in destroys] == [f"-chdir={lab.path}/lab/terraform/lab", f"-chdir={lab.path}/lab/terraform/datadog",
                                         f"-chdir={lab.path}/lab/terraform/datadog"]
-    deletes = [c for c in lab.calls() if c[:2] == ["kubectl", "delete"] and "mutatingwebhookconfiguration" in c]
-    assert any("datadog-webhook" in c and "--ignore-not-found" in c for c in deletes), lab.calls()
+    # The Cluster Agent creates a mutating and a validating datadog-webhook; live run: the validating one survived.
+    deletes = [c for c in lab.calls() if c[:2] == ["kubectl", "delete"] and "datadog-webhook" in c]
+    assert any("mutatingwebhookconfiguration,validatingwebhookconfiguration" in c and "--ignore-not-found" in c
+               for c in deletes), lab.calls()
     delete_index = lab.calls().index(deletes[0])
     destroy_index = lab.calls().index(destroys[-1])
     assert delete_index > destroy_index
@@ -646,6 +648,13 @@ def test_down_destroys_the_agent_release_before_the_rest_and_waits_between(lab):
     waits = [c for c in calls if c[:2] == ["kubectl", "wait"] and "datadogagentinternals" in c]
     assert any("--for=delete" in c and "--all" in c for c in waits), calls
     assert calls.index(destroys[1]) < calls.index(waits[0]) < calls.index(destroys[2])
+
+
+def test_down_fails_d4_when_the_validating_webhook_survives(lab):
+    rules = down_rules(lab, datadog_state="helm_release.operator\n")
+    rules["kubectl"].insert(0, {"match": ["get", "validatingwebhookconfiguration", "datadog-webhook"], "exit": 0})
+    r = lab.run("trap cleanup EXIT; cmd_down", rules)
+    assert r.returncode == 1 and "FAIL D4" in r.stderr and "validatingwebhookconfiguration" in r.stderr
 
 
 def test_down_fails_d3_when_datadogagentinternals_do_not_go_away(lab):

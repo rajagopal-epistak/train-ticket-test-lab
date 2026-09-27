@@ -125,7 +125,7 @@ The report lines give detection and recovery times, whether the APM Voucher erro
 | D1 | the repo's native teardown: `make reset-deploy Namespace=train-ticket`. The tracked `sw_deploy.yaml` already names the 46 Deployments, so no `deploy.yaml` is generated; a `deploy.yaml` you created yourself is left untouched. |
 | D2 | Terraform destroys stage `lab`: what the native reset misses (the `tsdb` release, flagd, the driver), the monitors, and namespace `train-ticket` with its volumes |
 | D3 | Terraform destroys stage `datadog`, only if this lab installed the Agent. Any other Agent is left alone. |
-| D4 | the namespaces and webhook are gone, and no monitor tagged `lab:<LAB_NAME>` remains |
+| D4 | the namespaces and both `datadog-webhook` configurations (mutating and validating) are gone, and no monitor tagged `lab:<LAB_NAME>` remains |
 
 ## Monitors
 
@@ -203,7 +203,7 @@ Names are deployment names (the 46 `ts-*` services, `tt-traffic-driver`, and `fl
 **If the Terraform state is lost** (`lab/terraform/*/terraform.tfstate.d/<LAB_NAME>`), tear down by hand:
 1. `make reset-deploy Namespace=train-ticket`;
 2. `kubectl delete namespace train-ticket`;
-3. if this lab installed the Agent: `kubectl delete datadogagent -n datadog datadog`, `helm -n datadog uninstall datadog-operator`, `kubectl delete mutatingwebhookconfiguration datadog-webhook --ignore-not-found`, `kubectl delete namespace datadog`;
+3. if this lab installed the Agent: `kubectl delete datadogagent -n datadog datadog`, `helm -n datadog uninstall datadog-operator`, `kubectl delete mutatingwebhookconfiguration,validatingwebhookconfiguration datadog-webhook --ignore-not-found`, `kubectl delete namespace datadog`;
 4. delete the monitors tagged `lab:<LAB_NAME>` in Datadog.
 
 ## Build and test

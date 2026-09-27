@@ -379,3 +379,4 @@ The plan's code was written and tested in a scratch clone before the plan. That 
 7. **P2 also checks each node's inotify limits** (at least 512 instances and 524288 watches, kind's known-issue values) with the P5 probe pod. At Ubuntu's default of 128 instances, services crash-looped and Nacos died.
 8. **The driver's trip queries send `startPlace`.** auto-query `9d5bc2d` sends `startingPlace`, which this version's `TripInfo` doesn't bind, so the driver never booked an order, never called `/getVoucher`, and F22 could not be detected. T1 now waits for the driver's `/getVoucher` calls before switching F22 on.
 9. **Terraform apply and destroy run with `-no-color`,** so logs and agents read plain text.
+10. **`down` deletes the validating `datadog-webhook` too,** and D4 checks both kinds: the first live `down` left the validating one behind (the H1 fix only covered the mutating one).
