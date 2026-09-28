@@ -15,8 +15,12 @@ nacos:
   domainName: cluster.local
   preferhostmode: hostname
   serverPort: 8848
+  ## A startup probe on the readiness endpoint (10 s x 60) and a liveness probe on the liveness endpoint: nacos-k8s's
+  ## 2.x endpoints; the startup budget matches the mysql chart's, not nacos-k8s's.
   health:
     enabled: false
+  ## The container's lifecycle hooks, e.g. postStart. Off when empty.
+  lifecycle: {}
   secretName: nacos-mysql
   db:
     name: "nacos"

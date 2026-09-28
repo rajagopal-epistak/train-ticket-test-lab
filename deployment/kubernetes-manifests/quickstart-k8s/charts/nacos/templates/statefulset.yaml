@@ -63,6 +63,26 @@ spec:
             - containerPort: 9849
               name: raft-rpc
               protocol: TCP
+          {{- if .Values.nacos.health.enabled }}
+          startupProbe:
+            httpGet:
+              path: /nacos/v1/console/health/readiness
+              port: {{ .Values.nacos.serverPort }}
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /nacos/v1/console/health/liveness
+              port: {{ .Values.nacos.serverPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 10
+          {{- end }}
+          {{- with .Values.nacos.lifecycle }}
+          lifecycle:
+{{ toYaml . | indent 12 }}
+          {{- end }}
           resources:
             requests:
               cpu: {{ .Values.resources.requests.cpu }}

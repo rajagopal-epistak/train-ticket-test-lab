@@ -7,6 +7,26 @@ locals {
   # killed it; the restart skipped init on the non-empty datadir. Kubernetes' remedy is a startup probe running the
   # liveness command, with failureThreshold × periodSeconds covering the worst case startup.
   mysql_startup_probe = yamlencode({ mysql = { startupProbe = { periodSeconds = 10, failureThreshold = 60 } } })
+  # Nothing restarted a Nacos that had failed (finding #22), so the chart's probes are on. A restarted container starts
+  # with 1.x double write on and refuses every service's gRPC register (finding #12), so a postStart hook turns it off
+  # on each container start. debug=true keeps the write on this member: a member starting before its peers needs no
+  # quorum. The hook sends Nacos's peer User-Agent: a member stays DOWN until a peer answers, its naming API refuses
+  # all but peer traffic meanwhile, and under OrderedReady its peers start only once it is Ready, so a hook waiting
+  # for UP deadlocks the first install. A failed hook kills the container, as a failed startup probe would.
+  # lab/nacos-research.md has the research.
+  nacos_restart_safety = yamlencode({ nacos = {
+    health = { enabled = true }
+    lifecycle = { postStart = { exec = { command = ["sh", "-c", <<-EOT
+      base=127.0.0.1:8848/nacos/v1/ns/operator/switches
+      for _ in $(seq 60); do
+        curl -sf -m 5 -A Nacos-Server -X PUT "$base?entry=doubleWriteEnabled&value=false&debug=true" >/dev/null &&
+          curl -sf -m 5 -A Nacos-Server "$base" | grep -q doubleWriteEnabled.:false && exit 0
+        sleep 10
+      done
+      exit 1
+    EOT
+    ] } } }
+  } })
 }
 
 resource "kubernetes_namespace_v1" "train_ticket" {
@@ -82,7 +102,7 @@ resource "helm_release" "nacos" {
   namespace       = kubernetes_namespace_v1.train_ticket.metadata[0].name
   timeout         = 1800
   upgrade_install = true
-  values          = [yamlencode(local.chart_pod_meta["nacos"])]
+  values          = [yamlencode(local.chart_pod_meta["nacos"]), local.nacos_restart_safety]
   set = [
     { name = "nacos.db.host", value = "nacosdb-mysql-leader" },
     { name = "nacos.db.username", value = "nacos" },
@@ -96,8 +116,8 @@ resource "helm_release" "nacos" {
 # passes its upgrade check. On the live run that check never passed ("upgrade check result false" every 5 s), so
 # every service's register was refused: "can't accept gRPC request temporarily ... close Double write to force open
 # 2.0 mode". 2.0.1 has no startup property for it (only standalone mode skips the check); Nacos's documented switch
-# is the operator API below. The switch lives in Nacos's memory and a restarted pod loses it, so this runs on
-# every apply: re-running `up` puts it back.
+# is the operator API below. A restarted container starts with double write on; the Nacos release's postStart hook
+# turns it off again, and this step, on every apply, confirms each member reads off before the Deployments start.
 resource "terraform_data" "nacos_double_write_off" {
   triggers_replace = [timestamp()]
   provisioner "local-exec" {
@@ -113,7 +133,7 @@ resource "terraform_data" "nacos_double_write_off" {
         tries=0
         until kubectl -n train-ticket exec "$pod" -c k8snacos -- sh -c '
           base=127.0.0.1:8848/nacos/v1/ns/operator/switches
-          curl -sf -m 5 -X PUT "$base?entry=doubleWriteEnabled&value=false" >/dev/null &&
+          curl -sf -m 5 -X PUT "$base?entry=doubleWriteEnabled&value=false&debug=true" >/dev/null &&
             curl -sf -m 5 "$base" | grep -q doubleWriteEnabled.:false'; do
           tries=$((tries + 1))
           [ "$tries" -lt 30 ] || { echo "Nacos $pod still has double write on after 30 tries" >&2; exit 1; }

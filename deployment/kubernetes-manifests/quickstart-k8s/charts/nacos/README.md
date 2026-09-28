@@ -39,7 +39,8 @@ The following table lists the configurable parameters of the Skywalking chart an
 | `nacos.image.repository` | Nacos container image name                                      | `nacos/nacos-server`                   |
 | `nacos.image.tag`   | Nacos container image tag                                       | `2.0.1`                                |
 | `nacos.image.pullPolicy` | Nacos container image pull policy                                | `IfNotPresent`                        |
-| `nacos.health.enabled` | Enable health check or not                                         | `false`                              |
+| `nacos.health.enabled` | Startup probe on `/nacos/v1/console/health/readiness` (10 s × 60) and liveness probe on `/nacos/v1/console/health/liveness` | `false`                              |
+| `nacos.lifecycle`   | The Nacos container's lifecycle hooks (e.g. `postStart`); empty is off | `{}`                                |
 | `nacos.secretName`  | secret name of db for nacos                                         | `nacos-mysql`                              |
 | `nacos.db.host`     | mysql  host                                                       |                                |
 | `nacos.db.name`     | mysql  database name                                                      |                                |

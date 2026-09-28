@@ -9,7 +9,7 @@ Where the Train-Ticket Datadog fault lab stands on 2026-09-28: what works, what 
 ## Status
 
 - **Phase 1** (eight switchable faults, traffic driver, lab images) is on master: PR #1, merge commit `a4c1abce`.
-- **Phase 2** (`lab/deploy`: Terraform in two stages, `lab/lab.sh up|test|down`, 12 Datadog monitors) is 37 commits on branch `lab/deploy`, pushed at `4e187f1c`, 150 tests passing. There is no PR yet.
+- **Phase 2** (`lab/deploy`: Terraform in two stages, `lab/lab.sh up|test|down`, 12 Datadog monitors) is on branch `lab/deploy`: 38 commits pushed at `e1b964e0`, plus the Nacos restart-safety change (2026-09-28); 154 tests passing. There is no PR yet.
 - **Validated on 2026-09-27** on a single-node k3s sandbox (32 vCPU, 31 GiB), starting from an empty cluster. `up` passed in about 35 min, then `test` passed:
 
 | Step | Result |
@@ -44,6 +44,7 @@ Where the Train-Ticket Datadog fault lab stands on 2026-09-28: what works, what 
 10. **Deploy level:** `""` only. Never `--independent-db` unless the owner says so.
 11. **MySQL first-time init (2026-09-27):** a startup probe (chart value, 10 s × 60, running the liveness command) plus a guard that fails `up` on a half-initialised pod. Rejected: raising the liveness `initialDelaySeconds`, which would blind liveness for 10 min after every later restart.
 12. Review 3's nits F4 and F5 stay as they are.
+13. **Nacos restart safety (2026-09-28):** the chart's probes plus a postStart hook that turns double write off (`debug=true`) on each container start. Rejected: upgrading to 2.5.x or 3.x, which fixes only #12 (`lab/nacos-research.md`).
 
 ## Open items, in rough order
 
@@ -53,7 +54,12 @@ Where the Train-Ticket Datadog fault lab stands on 2026-09-28: what works, what 
    - "Voucher p95 latency" (2 s): `/getVoucher` p95 was about 1.9 s with spikes to 6.7 s on a box at 26 of 31 GiB.
    F12 and F17 rely on these two, so their alerts can't be told from noise until the thresholds move.
 3. **Run the other seven faults live** (`lab/fault.sh on|off F<n>`), each confirming its intended monitor: F3 → OOMKilled/Restarts, F7 → Java latency/error rate, F12 → Business rejections, F14 → Fare anomaly, F15 → Edge 4xx, F17 → Voucher p95 latency. F3 is a memory fault and the lab already uses about 23.5 GiB.
-4. **Nacos has no liveness probe (finding #22).** The chart ignores its own `health.enabled`, and the image keeps the container Running after the JVM dies. A probe restart would lose the in-memory double-write switch until `up` re-runs, so this needs a decision. nacos-k8s uses a startup probe (180 s) plus HTTP liveness/readiness, but on 3.x paths; the 2.0.1 endpoint is unverified.
+4. **Prove the Nacos probes and hook live (finding #22's fix, in code, not yet run).**
+   - The next `up` on an existing lab restarts the three Nacos pods one at a time, because the pod template changes. That's safe: `initmysql` exits 0 on an existing schema.
+   - On a fresh `up`, confirm that nacos-0 comes up alone, then nacos-1 and nacos-2.
+   - Kill Java in one Nacos container. Watch the liveness restart, the hook turning the switch off, and the services still registering.
+   - Time `up`. The members now start one after another; single starts took up to 3 to 6 min on a loaded node, so expect 5 to 10 min more.
+   - Set the hook and startup-probe budgets from the measured starts (review D2). Today they are 10 min each, back to back, so three members at their worst would exceed the release's 30 min Helm timeout.
 5. **Open a PR `lab/deploy` → master.** Merging needs the owner's explicit yes.
 6. **Review backlog** (deferral approved by the owner):
    - L4: the README P3 row puts the key in argv (`curl -H "DD-API-KEY: …"`); use `-K -` as `dd_call` does.
@@ -65,7 +71,7 @@ Where the Train-Ticket Datadog fault lab stands on 2026-09-28: what works, what 
    - L12: the fixed log path `/tmp/lab-native-reset.log`; `tt-lab-probe` leaks if P5 is interrupted; a cluster with the Operator but no DatadogAgent passes P5, then S1 hits a CRD ownership conflict.
 7. **Deferred by the owner:** a `lab/lab.sh telemetry` on-the-fly toggle with an allow-list (deferred until validation passed, which it now has); a `DEPLOY_ARGS` input.
 8. **Phase-1 leftovers:** `lab/README.md` on master still says new packages start private; F12's `isLockedStation` has no null guard; F7/F1 use the shared commonPool; `fault.sh`'s cluster functions are untested.
-9. **Backlog:** phase-3 faults F6, F10, F16, F20 (Hagenberg as the spec); Chaos Mesh; a DB access-control fault class; muBench for topology tests.
+9. **Backlog:** phase-3 faults F6, F10, F16, F20 (Hagenberg as the spec); Chaos Mesh; a DB access-control fault class; muBench for topology tests; a Datadog monitor on Nacos itself, which nothing watches today (review D1, deferred 2026-09-28).
 10. **Parked spike:** Kubernetes-native routing instead of Nacos (below). Unpark only on the owner's say-so.
 
 ## What bit us (read before changing the deploy)
@@ -75,7 +81,7 @@ Finding numbers refer to `lab/live-run-findings.md`.
 - **MySQL first-time init** takes about 2 min when six pods initialise at once, and the chart's liveness probe allows 60 s. A kill mid-init leaves `$DATADIR/mysql`, so the restart skips init: no app user, no database, and xenon may elect that pod leader (#20; docker-library/mysql #439 is the same mechanism). Readiness (root's `SELECT 1` over the socket) also passes on the entrypoint's temporary server, which runs with networking off, so Helm's wait does not mean init is done (#24). A liveness restart just after init is harmless (#23).
 - **xenon** health-checks `root@localhost`, which arrives from `::1`, so every pod needs `root@'::1'` (#3). On a re-run, followers are `super_read_only` (#10).
 - **Never run `xenoncli mysql rebuildme` here.** It needs SSH between pods, which this chart doesn't configure; it killed mysqld and left nacosdb leaderless for 75 s (#21). Re-initialise a bad replica by deleting its PVC and pod.
-- **Nacos 2.0.1** in cluster mode stays in 1.x double-write mode and refuses gRPC registrations. The operator switch lives in memory, so `up` sets it on every apply (#12). Nacos 2.1.0 turns it off by default; 2.2.0 removes it.
+- **Nacos 2.0.1** in cluster mode stays in 1.x double-write mode and refuses gRPC registrations. A restarted container starts with the switch on, so a postStart hook turns it off on each container start and `up` checks it on every apply (#12, #22). Nacos 2.1.0 turns it off by default; 2.2.0 removes it.
 - **Node inotify limits** must be at least 512 instances and 524288 watches (#8).
 - **Spring Boot 2.7** (the fork's parent pom) rejects the SecurityConfig cycle in four rebuilt images; `SPRING_MAIN_ALLOWCIRCULARREFERENCES=true` is the documented fallback (#13).
 - **ts-avatar** needs AVX (dlib) and crash-loops on a QEMU CPU model without it (#14).
@@ -96,6 +102,10 @@ Finding numbers refer to `lab/live-run-findings.md`.
 - FudanSELab/train-ticket #233, #234, #293: the same leader/read-only symptom, fixed by hand. #246, #252, #268: storage or Kubernetes version problems.
 - Nacos release notes: 2.1.0 closes the 1.x upgrade support by default; 2.2.0 removes the double-write code.
 - Not found anywhere: the kill → half-init → leader chain, or xenon's election criteria.
+
+### Nacos restart safety and upgrade options (2026-09-28)
+
+`lab/nacos-research.md`: how the 2.0.1 switch really works (per member; `debug=true` writes locally), the probe and hook options, what an upgrade to 2.1.2, 2.5.4 or 3.2.4 needs (a new init step for the schema, no data migration; 3.x also needs three auth variables), why only #12 would go away, and the unresearched embedded-storage lever.
 
 ### Parked spike: Kubernetes-native routing instead of Nacos (2026-09-27)
 

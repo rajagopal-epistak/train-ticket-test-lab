@@ -317,15 +317,65 @@ def test_charts_put_the_switches_on_their_pods_and_nothing_by_default(chart, kin
 
 def test_nacos_double_write_is_switched_off_before_the_services_on_every_apply():
     # Live run: Nacos 2.0.1 stayed in 1.x double-write mode ("upgrade check result false" every 5 s) and refused every
-    # service's gRPC register. 2.0.1 has no startup property for it, and the switch lives in Nacos's memory.
+    # service's gRPC register. 2.0.1 has no startup property for it, and a restarted container starts with it on.
     text = (STAGE / "infra.tf").read_text() + (STAGE / "app.tf").read_text()
     step = re.search(r'resource "terraform_data" "nacos_double_write_off" \{(.*?)\n\}', text, re.S)
     assert step, "terraform_data.nacos_double_write_off missing"
     body = step.group(1)
     assert "timestamp()" in body and "helm_release.nacos" in body
-    assert "entry=doubleWriteEnabled&value=false" in body
+    assert "entry=doubleWriteEnabled&value=false&debug=true" in body
     deployments = re.search(r'resource "kubernetes_manifest" "deployments" \{(.*?)\n\}', text, re.S).group(1)
     assert "terraform_data.nacos_double_write_off" in deployments
+
+
+def test_nacos_chart_renders_the_probes_and_the_hook_only_when_set():
+    # Finding #22: the chart ignored its own health.enabled, so nothing restarted a Nacos that had failed.
+    def nacos_container(*args):
+        r = subprocess.run(["helm", "template", "x", str(CHARTS / "nacos"), *args], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        sts = next(d for d in yaml.safe_load_all(r.stdout) if d and d["kind"] == "StatefulSet")
+        return next(c for c in sts["spec"]["template"]["spec"]["containers"] if c["name"] == "k8snacos")
+    hook = {"postStart": {"exec": {"command": ["sh", "-c", "true"]}}}
+    on = nacos_container("--set", "nacos.health.enabled=true", "--set-json", f"nacos.lifecycle={json.dumps(hook)}")
+    assert on["startupProbe"]["httpGet"] == {"path": "/nacos/v1/console/health/readiness", "port": 8848}
+    assert on["livenessProbe"]["httpGet"] == {"path": "/nacos/v1/console/health/liveness", "port": 8848}
+    assert on["startupProbe"]["periodSeconds"] * on["startupProbe"]["failureThreshold"] >= 600
+    assert on["lifecycle"] == hook
+    assert not {"startupProbe", "livenessProbe", "readinessProbe", "lifecycle"} & set(nacos_container())
+
+
+def test_nacos_release_turns_on_the_probes_and_the_double_write_hook():
+    infra = (STAGE / "infra.tf").read_text()
+    blocks = dict(re.findall(r'resource "helm_release" "(\w+)" \{(.*?)\n\}', infra, re.S))
+    assert "local.nacos_restart_safety" in blocks["nacos"]
+    nacos = yaml.safe_load(evaluate("local.nacos_restart_safety"))["nacos"]
+    assert nacos["health"]["enabled"] is True
+    assert nacos["lifecycle"]["postStart"]["exec"]["command"][:2] == ["sh", "-c"]
+
+
+@pytest.mark.parametrize("value, ok", [("false", True), ("true", False)])
+def test_nacos_hook_turns_double_write_off_on_its_own_member(tmp_path, value, ok):
+    # A restarted container starts with double write on and refuses gRPC registers until it is off. debug=true keeps
+    # the write on this member. A member that starts before its peers stays DOWN until one answers, and meanwhile its
+    # naming API answers 503 to all but peer traffic: a hook waiting for UP deadlocked the first install under
+    # OrderedReady. Runs the real hook against a fake curl that answers like such a member of Nacos 2.0.1.
+    log = tmp_path / "curl.log"
+    body = '{"masters":null,"adWeightMap":{},"doubleWriteEnabled":%s,"distroEnabled":true}'
+    (tmp_path / "curl").write_text(
+        f"#!/usr/bin/env bash\necho \"$*\" >> {log}\n"
+        'case "$*" in *"-A Nacos-Server"*) ;; *) exit 22 ;; esac\n'
+        f"case \"$*\" in *PUT*) echo ok ;; *) echo '{body % value}' ;; esac\n")
+    (tmp_path / "sleep").write_text("#!/bin/sh\n")
+    for name in ("curl", "sleep"):
+        (tmp_path / name).chmod(0o755)
+    command = yaml.safe_load(evaluate("local.nacos_restart_safety"))["nacos"]["lifecycle"]["postStart"]["exec"]["command"]
+    r = subprocess.run(command, capture_output=True, text=True,
+                       env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"})
+    assert (r.returncode == 0) == ok, r.stderr
+    puts = [line for line in log.read_text().splitlines() if "PUT" in line]
+    assert all("127.0.0.1:8848/nacos/v1/ns/operator/switches?entry=doubleWriteEnabled&value=false&debug=true" in p
+               for p in puts)
+    assert len(puts) == (1 if ok else 60)
 
 
 @pytest.mark.parametrize("codes, ok, execs", [([0], True, 3), ([1, 1, 0], True, 5), ([1], False, 30)])
