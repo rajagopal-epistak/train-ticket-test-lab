@@ -4,6 +4,7 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -108,6 +109,32 @@ def test_voucher_scenario_skips_when_there_are_no_orders():
     q = FakeQuery(pairs=None)
     driver.query_and_get_voucher(q)
     assert q.session.calls == []
+
+
+def test_trip_date_follows_the_services_shanghai_day():
+    # Live run: autoquery fixes its date at import, and the travel service (Asia/Shanghai) refuses trips dated before
+    # its today. From 16:00 UTC, Shanghai's midnight, every preserve failed with "Cannot choose from an empty sequence".
+    utc = datetime.timezone.utc
+    assert driver.service_date(datetime.datetime(2026, 9, 27, 15, 59, tzinfo=utc)) == "2026-09-27"
+    assert driver.service_date(datetime.datetime(2026, 9, 27, 16, 0, tzinfo=utc)) == "2026-09-28"
+
+
+def test_each_scenario_runs_with_the_services_current_date(monkeypatch):
+    seen = []
+    dates = iter(["2026-09-27", "2026-09-28"])
+    monkeypatch.setattr(queries, "datestr", queries.datestr)
+    monkeypatch.setattr(driver, "login", FakeQuery)
+    monkeypatch.setattr(driver, "service_date", lambda now: next(dates))
+    monkeypatch.setattr(driver, "WEIGHTS", {lambda q: seen.append(queries.datestr): 1})
+
+    def stop_after_two(seconds):
+        if len(seen) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(driver.time, "sleep", stop_after_two)
+    with pytest.raises(KeyboardInterrupt):
+        driver.main()
+    assert seen == ["2026-09-27", "2026-09-28"]
 
 
 def test_weights_include_the_lab_scenarios():

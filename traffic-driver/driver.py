@@ -4,9 +4,10 @@ import os
 import random
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
-from autoquery import scenarios
+from autoquery import queries, scenarios
 from autoquery.queries import Query
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -28,9 +29,15 @@ INTERVAL = float(os.environ.get("INTERVAL_SECONDS", "1"))
 VOUCHER_TIMEOUT_SECONDS = 15  # a slow voucher lookup must be measured, not abandoned
 RELOGIN_SECONDS = 1800  # auth tokens expire after 1 h
 HEARTBEAT_EVERY = 50
+# The travel service runs on Asia/Shanghai (UTC+8, no DST) and refuses trips dated before its today.
+SERVICE_TZ = timezone(timedelta(hours=8))
 
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 NUMBER_SEGMENT_RE = re.compile(r"/\d+(\.\d+)?(?=/|$)")
+
+
+def service_date(now):
+    return now.astimezone(SERVICE_TZ).strftime("%Y-%m-%d")
 
 
 def normalize_path(url):
@@ -128,6 +135,8 @@ def main():
     runs = errors = 0
     while True:
         scenario = random.choices(list(WEIGHTS), weights=list(WEIGHTS.values()))[0]
+        # autoquery fixes its trip date at import; a driver that outlives the service's day would book past trips.
+        queries.datestr = service_date(datetime.now(timezone.utc))
         try:
             scenario(q)
         except Exception:
